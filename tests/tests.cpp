@@ -3,6 +3,7 @@
 #include "cpp_rag/prompt_builder.hpp"
 #include "cpp_rag/vector_search.hpp"
 
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -15,11 +16,43 @@
 #include <utility>
 #include <vector>
 
+#include <unistd.h>
+
 namespace {
 
 void check(bool condition, const char* message) {
     if (!condition) throw std::runtime_error(message);
 }
+
+// A uniquely named path that cleans up after itself, so tests can run concurrently
+// with each other or with a second copy of this binary.
+class TempPath {
+public:
+    explicit TempPath(const char* tag, const char* extension = ".index") {
+        static std::atomic<unsigned> counter{0};
+        path_ = (std::filesystem::temp_directory_path() /
+                 ("cpp-rag-" + std::to_string(::getpid()) + '-' +
+                  std::to_string(counter.fetch_add(1, std::memory_order_relaxed)) + '-' + tag +
+                  extension))
+                    .string();
+    }
+
+    ~TempPath() {
+        std::error_code ignored;
+        std::filesystem::remove(path_, ignored);
+        std::filesystem::remove(path_ + ".tmp", ignored);
+    }
+
+    TempPath(const TempPath&) = delete;
+    TempPath& operator=(const TempPath&) = delete;
+    TempPath(TempPath&&) = delete;
+    TempPath& operator=(TempPath&&) = delete;
+
+    [[nodiscard]] const std::string& path() const noexcept { return path_; }
+
+private:
+    std::string path_;
+};
 
 template <typename Exception, typename Callable>
 void expect_throws(Callable&& call, std::string_view reason) {
@@ -99,7 +132,8 @@ void test_chunking_large_overlap() {
 }
 
 void test_index_and_search() {
-    const auto path = (std::filesystem::temp_directory_path() / "cpp-rag-test.index").string();
+    const TempPath temp("index-search");
+    const auto& path = temp.path();
     const std::vector<cpp_rag::IndexItem> items{
         {{"a.txt", "first", 0, 5}, {1.0F, 0.0F, 0.0F, 0.0F}},
         {{"b.txt", "second", 10, 16}, {0.0F, 1.0F, 0.0F, 0.0F}},
@@ -116,7 +150,6 @@ void test_index_and_search() {
         check(results[0].index == 0, "best cosine result is wrong");
         check(std::abs(results[0].score - 1.0F) < 1e-5F, "cosine score is wrong");
     }
-    std::filesystem::remove(path);
 }
 
 void test_prompt_assembly() {
@@ -208,8 +241,151 @@ void test_prompt_budget_and_system_omission() {
           "over-tight budget dropped the fixed sections");
 }
 
+void test_chunk_options_validation() {
+    const std::string text = "alpha beta gamma";
+    const auto rejected = [&](cpp_rag::ChunkOptions options, std::string_view reason) {
+        expect_throws<std::invalid_argument>(
+            [&] { (void)cpp_rag::chunk_text(text, "memory", options); }, reason);
+    };
+    rejected({0, 0}, "max_bytes must fit the index format");
+    rejected({std::numeric_limits<std::uint32_t>::max() + std::size_t{1}, 0},
+             "max_bytes must fit the index format");
+    rejected({10, 10}, "overlap_bytes must be smaller than max_bytes");
+    rejected({10, 11}, "overlap_bytes must be smaller than max_bytes");
+
+    expect_throws<std::invalid_argument>(
+        [&] { (void)cpp_rag::chunk_text_multi_scale(text, "memory", {}); },
+        "at least one chunk scale is required");
+}
+
+void test_multi_scale_chunking() {
+    const std::string text = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda";
+    const std::vector<cpp_rag::ChunkOptions> scales{{12, 3}, {20, 5}, {30, 0}};
+    const auto chunks = cpp_rag::chunk_text_multi_scale(text, "memory", scales);
+    check(!chunks.empty(), "multi-scale chunking produced no chunks");
+
+    // Scale-major: every chunk of scale N precedes every chunk of scale N + 1.
+    std::size_t cursor = 0;
+    for (std::size_t scale = 0; scale < scales.size(); ++scale) {
+        const auto expected = cpp_rag::chunk_text(text, "memory", scales[scale]);
+        check(!expected.empty(), "single-scale chunking produced no chunks");
+        for (std::size_t i = 0; i < expected.size(); ++i) {
+            check(cursor < chunks.size(), "multi-scale output is shorter than expected");
+            const auto& chunk = chunks[cursor];
+            check(chunk.scale == scale, "chunk has the wrong scale");
+            check(chunk.scale_bytes == scales[scale].max_bytes, "chunk has the wrong scale_bytes");
+            check(chunk.text == expected[i].text && chunk.byte_begin == expected[i].byte_begin &&
+                      chunk.byte_end == expected[i].byte_end,
+                  "multi-scale chunk differs from the single-scale chunk");
+            ++cursor;
+        }
+    }
+    check(cursor == chunks.size(), "multi-scale output has extra chunks");
+
+    // chunk_file_multi_scale covers the document loader and keeps the source path.
+    const TempPath temp("doc", ".txt");
+    {
+        std::ofstream out(temp.path(), std::ios::binary | std::ios::trunc);
+        check(static_cast<bool>(out), "unable to write the test document");
+        out << text;
+    }
+    const auto from_file = cpp_rag::chunk_file_multi_scale(temp.path(), scales);
+    check(from_file.size() == chunks.size(), "chunk_file_multi_scale lost chunks");
+    for (const auto& chunk : from_file) {
+        check(chunk.source == temp.path(), "chunk_file_multi_scale lost the source path");
+    }
+}
+
+void test_index_write_validation() {
+    const TempPath temp("write-reject");
+
+    expect_throws<std::invalid_argument>(
+        [&] { cpp_rag::MmapIndex::write(temp.path(), std::span<const cpp_rag::IndexItem>{}); },
+        "cannot write an empty index");
+    check(!std::filesystem::exists(temp.path()), "rejected write created an index");
+
+    const std::vector<cpp_rag::IndexItem> empty_embedding{{{"a.txt", "first", 0, 5}, {}}};
+    expect_throws<std::invalid_argument>(
+        [&] { cpp_rag::MmapIndex::write(temp.path(), empty_embedding); },
+        "invalid embedding dimensions");
+
+    const std::vector<cpp_rag::IndexItem> ragged{
+        {{"a.txt", "first", 0, 5}, {1.0F, 0.0F}},
+        {{"b.txt", "second", 0, 6}, {1.0F, 0.0F, 0.0F}},
+    };
+    expect_throws<std::invalid_argument>(
+        [&] { cpp_rag::MmapIndex::write(temp.path(), ragged); },
+        "all embeddings must have equal dimensions");
+    check(!std::filesystem::exists(temp.path()), "rejected write created an index");
+    check(!std::filesystem::exists(temp.path() + ".tmp"), "rejected write left a temp file");
+}
+
+void test_search_input_validation() {
+    const TempPath temp("search-reject");
+    const std::vector<cpp_rag::IndexItem> items{
+        {{"a.txt", "first", 0, 5}, {1.0F, 0.0F}},
+        {{"zero.txt", "zero", 0, 4}, {0.0F, 0.0F}},
+    };
+    cpp_rag::MmapIndex::write(temp.path(), items);
+    cpp_rag::MmapIndex index(temp.path());
+
+    const std::vector<float> wrong{1.0F, 0.0F, 0.0F};
+    expect_throws<std::invalid_argument>(
+        [&] { (void)cpp_rag::search(index, wrong, 2); }, "dimensions do not match");
+    expect_throws<std::invalid_argument>(
+        [&] { (void)cpp_rag::dot_product(wrong, std::vector<float>{1.0F, 0.0F}); },
+        "dimensions do not match");
+    expect_throws<std::invalid_argument>(
+        [&] { (void)cpp_rag::cosine_similarity(wrong, std::vector<float>{1.0F, 0.0F}); },
+        "dimensions do not match");
+
+    // No results for no requested results, and a zero query cannot be scored.
+    check(cpp_rag::search(index, std::vector<float>{1.0F, 0.0F}, 0).empty(),
+          "top_k 0 returned results");
+    check(cpp_rag::search(index, std::vector<float>{0.0F, 0.0F}, 2).empty(),
+          "zero query returned results");
+
+    // A zero corpus vector scores 0 instead of dividing by a zero norm.
+    const auto results = cpp_rag::search(index, std::vector<float>{1.0F, 0.0F}, 2);
+    check(results.size() == 2, "expected both corpus items");
+    check(results[0].index == 0 && results[0].score == 1.0F, "expected the matching item first");
+    check(results[1].index == 1 && results[1].score == 0.0F, "zero norm item should score 0");
+}
+
+void test_index_roundtrip_fields() {
+    const TempPath temp("roundtrip");
+    const std::vector<cpp_rag::IndexItem> items{
+        {{"docs/a.txt", "first chunk", 0, 11, 0, 1000}, {0.0F, 3.0F, 4.0F}},
+        {{"docs/b.txt", "second chunk", 20, 32, 1, 200}, {1.0F, 0.0F, 0.0F}},
+    };
+    cpp_rag::MmapIndex::write(temp.path(), items);
+
+    cpp_rag::MmapIndex index(temp.path());
+    check(index.size() == 2 && index.dimensions() == 3, "index shape is wrong");
+    for (std::size_t i = 0; i < items.size(); ++i) {
+        const auto chunk = index.chunk(i);
+        check(chunk.source == items[i].chunk.source, "source did not round-trip");
+        check(chunk.text == items[i].chunk.text, "text did not round-trip");
+        check(chunk.byte_begin == items[i].chunk.byte_begin &&
+                  chunk.byte_end == items[i].chunk.byte_end,
+              "byte range did not round-trip");
+        check(index.scale(i) == items[i].chunk.scale, "scale did not round-trip");
+        check(index.scale_bytes(i) == items[i].chunk.scale_bytes, "scale_bytes did not round-trip");
+
+        const auto embedding = index.embedding(i);
+        check(embedding.size() == items[i].embedding.size(), "embedding size did not round-trip");
+        for (std::size_t d = 0; d < embedding.size(); ++d) {
+            check(embedding[d] == items[i].embedding[d], "embedding did not round-trip");
+        }
+        float squared = 0.0F;
+        for (const auto value : items[i].embedding) squared += value * value;
+        check(std::abs(index.norm(i) - std::sqrt(squared)) < 1e-5F, "stored norm is wrong");
+    }
+}
+
 void test_search_retains_best_top_k() {
-    const auto path = (std::filesystem::temp_directory_path() / "cpp-rag-topk.index").string();
+    const TempPath temp("topk");
+    const auto& path = temp.path();
     const std::vector<cpp_rag::IndexItem> items{
         {{"a.txt", "first", 0, 5}, {1.0F, 0.0F, 0.0F, 0.0F}},
         {{"b.txt", "second", 10, 16}, {0.8F, 0.0F, 0.0F, 0.0F}},
@@ -225,7 +401,6 @@ void test_search_retains_best_top_k() {
     check(results[0].index == 0, "highest dot-product score should be first");
     check(results[1].index == 3, "second-best result should be the 0.95 item");
     check(results[2].index == 2, "third-best result should be the 0.90 item");
-    std::filesystem::remove(path);
 }
 
 // Header field offsets in the CPPRAGIX v2 file format.
@@ -278,7 +453,8 @@ void expect_rejected(const std::string& path, std::string_view reason) {
 }
 
 void test_index_closed_state() {
-    const auto path = (std::filesystem::temp_directory_path() / "cpp-rag-closed.index").string();
+    const TempPath temp("closed");
+    const auto& path = temp.path();
     const std::vector<cpp_rag::IndexItem> items{
         {{"a.txt", "first", 0, 5}, {1.0F, 0.0F}},
         {{"b.txt", "second", 10, 16}, {0.0F, 1.0F}},
@@ -325,11 +501,11 @@ void test_index_closed_state() {
     reopened = std::move(alias);
     check(reopened.is_open() && reopened.size() == 2, "self move-assignment closed the index");
 
-    std::filesystem::remove(path);
 }
 
 void test_index_rejects_corrupt_headers() {
-    const auto path = (std::filesystem::temp_directory_path() / "cpp-rag-corrupt.index").string();
+    const TempPath temp("corrupt");
+    const auto& path = temp.path();
     const std::vector<cpp_rag::IndexItem> items{
         {{"a.txt", "first", 0, 5}, {1.0F, 0.0F, 0.0F, 0.0F}},
         {{"b.txt", "second", 10, 16}, {0.0F, 1.0F, 0.0F, 0.0F}},
@@ -408,11 +584,11 @@ void test_index_rejects_corrupt_headers() {
     patch_field(path, 0, &corrupted_magic, 1);
     expect_rejected(path, "invalid index magic");
 
-    std::filesystem::remove(path);
 }
 
 void test_multi_scale_search_ordering() {
-    const auto path = (std::filesystem::temp_directory_path() / "cpp-rag-scale.index").string();
+    const TempPath temp("scale");
+    const auto& path = temp.path();
     // Two chunk scales; the strongest results overall come from scale 0.
     const std::vector<cpp_rag::IndexItem> items{
         {{"a.txt", "fine 1", 0, 6, 0, 1000}, {1.0F, 0.0F}},
@@ -453,7 +629,6 @@ void test_multi_scale_search_ordering() {
     check(wide.size() == 3 && wide[0].index == 0 && wide[1].index == 1 && wide[2].index == 2,
           "per-scale quota of two should return the global top three");
 
-    std::filesystem::remove(path);
 }
 
 }  // namespace
@@ -462,7 +637,12 @@ int main() {
     try {
         test_chunking();
         test_chunking_large_overlap();
+        test_chunk_options_validation();
+        test_multi_scale_chunking();
         test_index_and_search();
+        test_index_write_validation();
+        test_index_roundtrip_fields();
+        test_search_input_validation();
         test_index_rejects_corrupt_headers();
         test_index_closed_state();
         test_prompt_assembly();

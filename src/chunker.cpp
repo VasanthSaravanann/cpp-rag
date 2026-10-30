@@ -1,9 +1,10 @@
 #include "cpp_rag/chunker.hpp"
 
+#include "cpp_rag/document_loader.hpp"
+
 #include <algorithm>
 #include <cctype>
-#include <fstream>
-#include <iterator>
+#include <limits>
 #include <stdexcept>
 
 namespace cpp_rag {
@@ -47,8 +48,9 @@ std::size_t choose_end(std::string_view text, std::size_t begin, std::size_t max
 
 std::vector<Chunk> chunk_text(std::string_view text, std::string source,
                               ChunkOptions options) {
-    if (options.max_bytes == 0) {
-        throw std::invalid_argument("chunk max_bytes must be greater than zero");
+    if (options.max_bytes == 0 ||
+        options.max_bytes > std::numeric_limits<std::uint32_t>::max()) {
+        throw std::invalid_argument("chunk max_bytes must fit the index format");
     }
     if (options.overlap_bytes >= options.max_bytes) {
         throw std::invalid_argument("chunk overlap_bytes must be smaller than max_bytes");
@@ -58,7 +60,8 @@ std::vector<Chunk> chunk_text(std::string_view text, std::string source,
     std::size_t begin = 0;
     while (begin < text.size()) {
         const auto end = choose_end(text, begin, options.max_bytes);
-        chunks.push_back(Chunk{source, std::string(text.substr(begin, end - begin)), begin, end});
+        chunks.push_back(Chunk{source, std::string(text.substr(begin, end - begin)), begin, end,
+                               0, static_cast<std::uint32_t>(options.max_bytes)});
         if (end == text.size()) {
             break;
         }
@@ -71,12 +74,35 @@ std::vector<Chunk> chunk_text(std::string_view text, std::string source,
 }
 
 std::vector<Chunk> chunk_file(const std::string& path, ChunkOptions options) {
-    std::ifstream input(path, std::ios::binary);
-    if (!input) {
-        throw std::runtime_error("unable to open input file: " + path);
+    return chunk_text(load_document_text(path), path, options);
+}
+
+std::vector<Chunk> chunk_text_multi_scale(std::string_view text, std::string source,
+                                          std::span<const ChunkOptions> scales) {
+    if (scales.empty()) throw std::invalid_argument("at least one chunk scale is required");
+    if (scales.size() > std::numeric_limits<std::uint32_t>::max()) {
+        throw std::invalid_argument("too many chunk scales");
     }
-    std::string text((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
-    return chunk_text(text, path, options);
+
+    std::vector<Chunk> result;
+    for (std::size_t scale = 0; scale < scales.size(); ++scale) {
+        if (scales[scale].max_bytes > std::numeric_limits<std::uint32_t>::max()) {
+            throw std::invalid_argument("chunk scale exceeds index format limit");
+        }
+        auto chunks = chunk_text(text, source, scales[scale]);
+        for (auto& chunk : chunks) {
+            chunk.scale = static_cast<std::uint32_t>(scale);
+            chunk.scale_bytes = static_cast<std::uint32_t>(scales[scale].max_bytes);
+            result.push_back(std::move(chunk));
+        }
+    }
+    return result;
+}
+
+std::vector<Chunk> chunk_file_multi_scale(const std::string& path,
+                                          std::span<const ChunkOptions> scales) {
+    const auto text = load_document_text(path);
+    return chunk_text_multi_scale(text, path, scales);
 }
 
 }  // namespace cpp_rag

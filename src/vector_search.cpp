@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <map>
 #include <queue>
 #include <stdexcept>
 
@@ -84,7 +85,9 @@ std::vector<SearchResult> search(const MmapIndex& index,
             return lhs.score > rhs.score;
         }
     };
-    std::priority_queue<SearchResult, std::vector<SearchResult>, LowerScoreFirst> best;
+    using ResultHeap =
+        std::priority_queue<SearchResult, std::vector<SearchResult>, LowerScoreFirst>;
+    std::map<std::uint32_t, ResultHeap> per_scale;
 
     for (std::size_t i = 0; i < index.size(); ++i) {
         auto score = dot_product(index.embedding(i), query);
@@ -92,22 +95,49 @@ std::vector<SearchResult> search(const MmapIndex& index,
             const auto item_norm = index.norm(i);
             score = item_norm == 0.0F ? 0.0F : score / (item_norm * query_norm);
         }
+        SearchResult candidate{i, score, index.scale(i), index.scale_bytes(i), 0};
+        auto& best = per_scale[candidate.scale];
         if (best.size() < top_k) {
-            best.push({i, score});
+            best.push(candidate);
         } else if (score > best.top().score) {
             best.pop();
-            best.push({i, score});
+            best.push(candidate);
+        }
+    }
+
+    std::map<std::uint32_t, std::vector<SearchResult>> ranked_scales;
+    for (auto& [scale, heap] : per_scale) {
+        auto& ranked = ranked_scales[scale];
+        ranked.reserve(heap.size());
+        while (!heap.empty()) {
+            ranked.push_back(heap.top());
+            heap.pop();
+        }
+        std::sort(ranked.begin(), ranked.end(),
+                  [](const auto& lhs, const auto& rhs) { return lhs.score > rhs.score; });
+        for (std::size_t rank = 0; rank < ranked.size(); ++rank) {
+            ranked[rank].rank_within_scale = rank + 1;
         }
     }
 
     std::vector<SearchResult> results;
-    results.reserve(best.size());
-    while (!best.empty()) {
-        results.push_back(best.top());
-        best.pop();
+    results.reserve(top_k);
+    for (std::size_t rank = 0; results.size() < top_k; ++rank) {
+        std::vector<SearchResult> round;
+        for (const auto& [scale, ranked] : ranked_scales) {
+            (void)scale;
+            if (rank < ranked.size()) round.push_back(ranked[rank]);
+        }
+        if (round.empty()) break;
+        std::sort(round.begin(), round.end(), [](const auto& lhs, const auto& rhs) {
+            if (lhs.score != rhs.score) return lhs.score > rhs.score;
+            return lhs.scale < rhs.scale;
+        });
+        for (const auto& candidate : round) {
+            if (results.size() == top_k) break;
+            results.push_back(candidate);
+        }
     }
-    std::sort(results.begin(), results.end(),
-              [](const auto& lhs, const auto& rhs) { return lhs.score > rhs.score; });
     return results;
 }
 

@@ -18,7 +18,7 @@ namespace cpp_rag {
 namespace {
 
 constexpr char kMagic[8] = {'C', 'P', 'P', 'R', 'A', 'G', 'I', 'X'};
-constexpr std::uint32_t kVersion = 1;
+constexpr std::uint32_t kVersion = 2;
 
 struct Header {
     char magic[8];
@@ -43,9 +43,11 @@ struct Record {
     std::uint64_t byte_end;
     std::uint64_t vector_index;
     float norm;
+    std::uint32_t scale;
+    std::uint32_t scale_bytes;
     std::uint32_t reserved;
 };
-static_assert(sizeof(Record) == 64);
+static_assert(sizeof(Record) == 72);
 
 std::uint64_t align_up(std::uint64_t value, std::uint64_t alignment) {
     return (value + alignment - 1) / alignment * alignment;
@@ -115,6 +117,10 @@ void MmapIndex::write(const std::string& path, std::span<const IndexItem> items)
         item_record.byte_begin = item.chunk.byte_begin;
         item_record.byte_end = item.chunk.byte_end;
         item_record.vector_index = i;
+        item_record.scale = item.chunk.scale;
+        item_record.scale_bytes = item.chunk.scale_bytes == 0
+            ? static_cast<std::uint32_t>(std::max<std::size_t>(1, item.chunk.text.size()))
+            : item.chunk.scale_bytes;
         double squared_norm = 0.0;
         for (const auto value : item.embedding) {
             squared_norm += static_cast<double>(value) * value;
@@ -216,8 +222,13 @@ void MmapIndex::validate() {
         throw std::runtime_error("index header is truncated");
     }
     const auto& h = header(data_);
-    if (std::memcmp(h.magic, kMagic, sizeof(kMagic)) != 0 || h.version != kVersion ||
-        h.header_size != sizeof(Header) || h.record_size != sizeof(Record) ||
+    if (std::memcmp(h.magic, kMagic, sizeof(kMagic)) != 0) {
+        throw std::runtime_error("invalid index magic");
+    }
+    if (h.version != kVersion) {
+        throw std::runtime_error("unsupported index version; rebuild the index for MSI v2");
+    }
+    if (h.header_size != sizeof(Header) || h.record_size != sizeof(Record) ||
         h.file_size != mapped_size_ || h.dimensions == 0 || h.item_count == 0) {
         throw std::runtime_error("invalid or unsupported index header");
     }
@@ -233,7 +244,8 @@ void MmapIndex::validate() {
             r.source_offset < h.strings_offset ||
             r.text_offset < r.source_offset + r.source_size ||
             r.text_offset + r.text_size < r.text_offset ||
-            r.vector_index >= h.item_count || r.byte_begin > r.byte_end) {
+            r.vector_index >= h.item_count || r.byte_begin > r.byte_end ||
+            r.scale_bytes == 0) {
             throw std::runtime_error("index record is invalid");
         }
     }
@@ -248,7 +260,8 @@ Chunk MmapIndex::chunk(std::size_t index) const {
     const auto* chars = reinterpret_cast<const char*>(data_);
     return {std::string(chars + r.source_offset, r.source_size),
             std::string(chars + r.text_offset, r.text_size),
-            static_cast<std::size_t>(r.byte_begin), static_cast<std::size_t>(r.byte_end)};
+            static_cast<std::size_t>(r.byte_begin), static_cast<std::size_t>(r.byte_end),
+            r.scale, r.scale_bytes};
 }
 
 std::span<const float> MmapIndex::embedding(std::size_t index) const {
@@ -261,6 +274,16 @@ std::span<const float> MmapIndex::embedding(std::size_t index) const {
 float MmapIndex::norm(std::size_t index) const {
     if (index >= size()) throw std::out_of_range("index item out of range");
     return record(data_, index).norm;
+}
+
+std::uint32_t MmapIndex::scale(std::size_t index) const {
+    if (index >= size()) throw std::out_of_range("index item out of range");
+    return record(data_, index).scale;
+}
+
+std::uint32_t MmapIndex::scale_bytes(std::size_t index) const {
+    if (index >= size()) throw std::out_of_range("index item out of range");
+    return record(data_, index).scale_bytes;
 }
 
 }  // namespace cpp_rag

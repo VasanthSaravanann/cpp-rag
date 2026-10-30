@@ -3,6 +3,7 @@
 #include "cpp_rag/chunker.hpp"
 
 #include <cstddef>
+#include <cstdint>
 #include <span>
 #include <string>
 #include <vector>
@@ -32,6 +33,8 @@ public:
     [[nodiscard]] Chunk chunk(std::size_t index) const;
     [[nodiscard]] std::span<const float> embedding(std::size_t index) const;
     [[nodiscard]] float norm(std::size_t index) const;
+    [[nodiscard]] std::uint32_t scale(std::size_t index) const;
+    [[nodiscard]] std::uint32_t scale_bytes(std::size_t index) const;
 
 private:
     void close() noexcept;

@@ -10,12 +10,29 @@ option(CPP_RAG_WITH_LLAMA "Build llama.cpp embedding integration" ON)
 option(CPP_RAG_BUILD_TESTS "Build unit tests" ON)
 set(LLAMA_CPP_DIR "" CACHE PATH "Path to an existing llama.cpp checkout")
 
+# PDF text extraction uses PDFKit on Apple platforms and a throwing stub elsewhere.
 add_library(cpp_rag_core STATIC
     src/chunker.cpp
+    src/document_loader.cpp
     src/mmap_index.cpp
     src/prompt_builder.cpp
     src/vector_search.cpp
 )
+if(APPLE)
+    # CMake compiles .mm sources with the C++ rule; clang selects Objective-C++
+    # from the extension. Enabling the OBJCXX language instead would make
+    # llama.cpp's ggml Metal .m sources compile as Objective-C++ and fail.
+    target_sources(cpp_rag_core PRIVATE src/pdf_loader_apple.mm)
+    set_source_files_properties(src/pdf_loader_apple.mm PROPERTIES
+        COMPILE_OPTIONS "-fobjc-arc"
+    )
+    target_link_libraries(cpp_rag_core PRIVATE
+        "-framework Foundation"
+        "-framework PDFKit"
+    )
+else()
+    target_sources(cpp_rag_core PRIVATE src/pdf_loader_stub.cpp)
+endif()
 target_include_directories(cpp_rag_core PUBLIC include)
 target_compile_features(cpp_rag_core PUBLIC cxx_std_20)
 if(MSVC)

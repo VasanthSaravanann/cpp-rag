@@ -4,10 +4,14 @@
 #include "cpp_rag/vector_search.hpp"
 
 #include <cmath>
+#include <cstdint>
+#include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace {
@@ -147,6 +151,138 @@ void test_search_retains_best_top_k() {
     std::filesystem::remove(path);
 }
 
+// Header field offsets in the CPPRAGIX v2 file format.
+constexpr std::size_t kVersionOffset = 8;
+constexpr std::size_t kItemCountOffset = 16;
+constexpr std::size_t kDimensionsOffset = 24;
+constexpr std::size_t kRecordsOffsetOffset = 32;
+constexpr std::size_t kVectorsOffsetOffset = 40;
+constexpr std::size_t kStringsOffsetOffset = 48;
+constexpr std::size_t kFileSizeOffset = 56;
+constexpr std::size_t kRecordSize = 72;
+constexpr std::size_t kFirstRecordOffset = 64;
+
+void patch_field(const std::string& path, std::size_t offset, const void* bytes,
+                 std::size_t size) {
+    std::fstream file(path, std::ios::binary | std::ios::in | std::ios::out);
+    check(static_cast<bool>(file), "unable to open index for patching");
+    file.seekp(static_cast<std::streamoff>(offset));
+    file.write(static_cast<const char*>(bytes), static_cast<std::streamsize>(size));
+    check(static_cast<bool>(file), "unable to patch index");
+}
+
+template <typename T>
+void patch_field(const std::string& path, std::size_t offset, T value) {
+    patch_field(path, offset, &value, sizeof(value));
+}
+
+template <typename T>
+T read_field(const std::string& path, std::size_t offset) {
+    std::ifstream file(path, std::ios::binary);
+    check(static_cast<bool>(file), "unable to open index for reading");
+    T value{};
+    file.seekg(static_cast<std::streamoff>(offset));
+    file.read(reinterpret_cast<char*>(&value), sizeof(value));
+    check(static_cast<bool>(file), "unable to read index field");
+    return value;
+}
+
+void expect_rejected(const std::string& path, std::string_view reason) {
+    std::string error;
+    try {
+        cpp_rag::MmapIndex index(path);
+        (void)index;
+    } catch (const std::exception& exception) {
+        error = exception.what();
+    }
+    check(!error.empty(), "corrupt index was accepted");
+    const std::string message = "unexpected rejection reason: " + error;
+    check(error.find(reason) != std::string::npos, message.c_str());
+}
+
+void test_index_rejects_corrupt_headers() {
+    const auto path = (std::filesystem::temp_directory_path() / "cpp-rag-corrupt.index").string();
+    const std::vector<cpp_rag::IndexItem> items{
+        {{"a.txt", "first", 0, 5}, {1.0F, 0.0F, 0.0F, 0.0F}},
+        {{"b.txt", "second", 10, 16}, {0.0F, 1.0F, 0.0F, 0.0F}},
+    };
+    const auto write_clean = [&] { cpp_rag::MmapIndex::write(path, items); };
+
+    write_clean();
+    {
+        cpp_rag::MmapIndex index(path);
+        check(index.size() == 2 && index.dimensions() == 4, "valid index did not open");
+    }
+
+    // Would wrap item_count * sizeof(Record) and item_count * dimensions * sizeof(float),
+    // letting the record loop read past the mapping.
+    write_clean();
+    patch_field(path, kItemCountOffset, std::uint64_t{1} << 63);
+    expect_rejected(path, "record section");
+
+    // Record section no longer fits in the file.
+    write_clean();
+    patch_field(path, kItemCountOffset, std::uint64_t{4});
+    expect_rejected(path, "record section");
+
+    // Records must not run into the vector section either.
+    write_clean();
+    patch_field(path, kItemCountOffset, std::uint64_t{3});
+    expect_rejected(path, "vector section");
+
+    // Records overlapping the header.
+    write_clean();
+    patch_field(path, kRecordsOffsetOffset, std::uint64_t{0});
+    expect_rejected(path, "record section");
+
+    // Vectors must not overlap the records, must be float-aligned and must fit.
+    write_clean();
+    patch_field(path, kVectorsOffsetOffset, read_field<std::uint64_t>(path, kVectorsOffsetOffset) - 1);
+    expect_rejected(path, "vector section");
+
+    write_clean();
+    patch_field(path, kVectorsOffsetOffset, read_field<std::uint64_t>(path, kVectorsOffsetOffset) + 1);
+    expect_rejected(path, "vector section");
+
+    write_clean();
+    patch_field(path, kDimensionsOffset, std::uint32_t{0xFFFFFFFFU});
+    expect_rejected(path, "vector section");
+
+    // String section must follow the vectors and stay inside the file.
+    write_clean();
+    patch_field(path, kStringsOffsetOffset, read_field<std::uint64_t>(path, kFileSizeOffset) + 1);
+    expect_rejected(path, "string section");
+
+    write_clean();
+    patch_field(path, kStringsOffsetOffset, std::uint64_t{0});
+    expect_rejected(path, "string section");
+
+    // Record fields must stay inside the string section and the file.
+    write_clean();
+    patch_field(path, kFirstRecordOffset, std::uint64_t{0xFFFFFFFFU});
+    expect_rejected(path, "index record is invalid");
+
+    write_clean();
+    patch_field(path, kFirstRecordOffset + 64, std::uint32_t{0});
+    expect_rejected(path, "index record is invalid");
+
+    // Header identity checks still apply.
+    write_clean();
+    patch_field(path, kVersionOffset, std::uint32_t{1});
+    expect_rejected(path, "unsupported index version");
+
+    write_clean();
+    patch_field(path, kFileSizeOffset, read_field<std::uint64_t>(path, kFileSizeOffset) + 1);
+    expect_rejected(path, "invalid or unsupported index header");
+
+    write_clean();
+    const char corrupted_magic = 'X';
+    patch_field(path, 0, &corrupted_magic, 1);
+    expect_rejected(path, "invalid index magic");
+
+    std::filesystem::remove(path);
+}
+
 void test_multi_scale_search_ordering() {
     const auto path = (std::filesystem::temp_directory_path() / "cpp-rag-scale.index").string();
     // Two chunk scales; the strongest results overall come from scale 0.
@@ -199,6 +335,7 @@ int main() {
         test_chunking();
         test_chunking_large_overlap();
         test_index_and_search();
+        test_index_rejects_corrupt_headers();
         test_prompt_assembly();
         test_search_retains_best_top_k();
         test_multi_scale_search_ordering();

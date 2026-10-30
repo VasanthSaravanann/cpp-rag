@@ -232,11 +232,26 @@ void MmapIndex::validate() {
         h.file_size != mapped_size_ || h.dimensions == 0 || h.item_count == 0) {
         throw std::runtime_error("invalid or unsupported index header");
     }
-    if (!range_valid(h.records_offset, h.item_count * sizeof(Record), h.file_size) ||
-        !range_valid(h.vectors_offset, h.item_count * h.dimensions * sizeof(float), h.file_size) ||
-        h.strings_offset < h.vectors_offset) {
-        throw std::runtime_error("index data range is invalid");
+
+    // Section sizes are checked by division, never by multiplying a header field:
+    // a crafted item_count or dimensions would otherwise wrap the byte-size
+    // multiplication, pass range_valid(), and let the record loop read past the
+    // mapping. Each check below also proves the multiplication that follows it.
+    if (h.records_offset < sizeof(Header) || h.records_offset > h.file_size ||
+        h.item_count > (h.file_size - h.records_offset) / sizeof(Record)) {
+        throw std::runtime_error("index record section is invalid");
     }
+    const auto records_end = h.records_offset + h.item_count * sizeof(Record);
+    if (h.vectors_offset < records_end || h.vectors_offset > h.file_size ||
+        h.vectors_offset % alignof(float) != 0 ||
+        h.dimensions > (h.file_size - h.vectors_offset) / sizeof(float) / h.item_count) {
+        throw std::runtime_error("index vector section is invalid");
+    }
+    const auto vector_end = h.vectors_offset + h.item_count * h.dimensions * sizeof(float);
+    if (h.strings_offset < vector_end || h.strings_offset > h.file_size) {
+        throw std::runtime_error("index string section is invalid");
+    }
+
     for (std::size_t i = 0; i < h.item_count; ++i) {
         const auto& r = record(data_, i);
         if (!range_valid(r.source_offset, r.source_size, h.file_size) ||
@@ -267,6 +282,8 @@ Chunk MmapIndex::chunk(std::size_t index) const {
 std::span<const float> MmapIndex::embedding(std::size_t index) const {
     if (index >= size()) throw std::out_of_range("index item out of range");
     const auto vector_index = record(data_, index).vector_index;
+    // validate() accepted the whole vector section inside the file and aligned it to
+    // float, so this offset cannot wrap and the cast is well aligned.
     const auto offset = header(data_).vectors_offset + vector_index * dimensions() * sizeof(float);
     return {reinterpret_cast<const float*>(data_ + offset), dimensions()};
 }

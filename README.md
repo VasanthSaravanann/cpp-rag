@@ -22,6 +22,8 @@ cmake --build build-core -j
 ctest --test-dir build-core --output-on-failure
 ```
 
+Editor tooling reads compile flags through `.clangd` from the `build/` tree, so the llama translation units get `llama.h` and `CPP_RAG_WITH_LLAMA` defined. Configuring only `build-core` still parses the core sources, but clangd then borrows a command from another file for the llama sources and treats their llama-only code as inactive.
+
 ## Index documents
 
 Use an embedding GGUF model with pooling support, such as a BGE model converted for llama.cpp:

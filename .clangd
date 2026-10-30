@@ -1,5 +1,14 @@
+# clangd takes compile flags from the llama-enabled build tree, so llama_embedder.cpp,
+# llama_generator.cpp and main.cpp are parsed with -DCPP_RAG_WITH_LLAMA=1 and the
+# llama.h/ggml include paths. build-core only covers the core sources: pointing this at
+# it makes clangd borrow a command from another file for the llama translation units and
+# treat their llama-only code as inactive.
+#
+# Both build trees are generated and gitignored. After `cmake -S . -B build`, clangd
+# needs no restart; only `cmake -S . -B build-core` leaves the llama sources without real
+# flags.
 CompileFlags:
-  CompilationDatabase: build-core
+  CompilationDatabase: build
   Add:
     - -std=c++20
     - -Iinclude

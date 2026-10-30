@@ -86,7 +86,8 @@ std::vector<SearchResult> search(const MmapIndex& index,
     if (query.size() != index.dimensions()) {
         throw std::invalid_argument("query dimensions do not match index");
     }
-    if (top_k == 0 || index.size() == 0) {
+    const auto item_count = index.size();
+    if (top_k == 0 || item_count == 0) {
         return {};
     }
 
@@ -98,7 +99,7 @@ std::vector<SearchResult> search(const MmapIndex& index,
         }
     }
 
-    top_k = std::min(top_k, index.size());
+    top_k = std::min(top_k, item_count);
     // The global top-k is always contained in the union of the per-scale top-k, so
     // one heap per scale is enough. In max_per_scale mode only the per-scale leaders
     // can be returned, so the heaps only need to hold that many.
@@ -107,7 +108,7 @@ std::vector<SearchResult> search(const MmapIndex& index,
         : std::min(top_k, options.max_per_scale);
 
     std::map<std::uint32_t, ResultHeap> per_scale;
-    for (std::size_t i = 0; i < index.size(); ++i) {
+    for (std::size_t i = 0; i < item_count; ++i) {
         auto score = dot_product(index.embedding(i), query);
         if (options.metric == Metric::cosine) {
             const auto item_norm = index.norm(i);

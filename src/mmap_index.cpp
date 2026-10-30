@@ -266,13 +266,22 @@ void MmapIndex::validate() {
     }
 }
 
-std::size_t MmapIndex::size() const noexcept { return static_cast<std::size_t>(header(data_).item_count); }
-std::size_t MmapIndex::dimensions() const noexcept { return header(data_).dimensions; }
+const std::byte* MmapIndex::bytes() const {
+    if (data_ == nullptr) throw std::logic_error("index is not open");
+    return data_;
+}
+
+std::size_t MmapIndex::size() const {
+    return static_cast<std::size_t>(header(bytes()).item_count);
+}
+
+std::size_t MmapIndex::dimensions() const { return header(bytes()).dimensions; }
 
 Chunk MmapIndex::chunk(std::size_t index) const {
     if (index >= size()) throw std::out_of_range("index item out of range");
-    const auto& r = record(data_, index);
-    const auto* chars = reinterpret_cast<const char*>(data_);
+    const auto* data = bytes();
+    const auto& r = record(data, index);
+    const auto* chars = reinterpret_cast<const char*>(data);
     return {std::string(chars + r.source_offset, r.source_size),
             std::string(chars + r.text_offset, r.text_size),
             static_cast<std::size_t>(r.byte_begin), static_cast<std::size_t>(r.byte_end),
@@ -281,26 +290,27 @@ Chunk MmapIndex::chunk(std::size_t index) const {
 
 std::span<const float> MmapIndex::embedding(std::size_t index) const {
     if (index >= size()) throw std::out_of_range("index item out of range");
-    const auto vector_index = record(data_, index).vector_index;
+    const auto* data = bytes();
+    const auto vector_index = record(data, index).vector_index;
     // validate() accepted the whole vector section inside the file and aligned it to
     // float, so this offset cannot wrap and the cast is well aligned.
-    const auto offset = header(data_).vectors_offset + vector_index * dimensions() * sizeof(float);
-    return {reinterpret_cast<const float*>(data_ + offset), dimensions()};
+    const auto offset = header(data).vectors_offset + vector_index * dimensions() * sizeof(float);
+    return {reinterpret_cast<const float*>(data + offset), dimensions()};
 }
 
 float MmapIndex::norm(std::size_t index) const {
     if (index >= size()) throw std::out_of_range("index item out of range");
-    return record(data_, index).norm;
+    return record(bytes(), index).norm;
 }
 
 std::uint32_t MmapIndex::scale(std::size_t index) const {
     if (index >= size()) throw std::out_of_range("index item out of range");
-    return record(data_, index).scale;
+    return record(bytes(), index).scale;
 }
 
 std::uint32_t MmapIndex::scale_bytes(std::size_t index) const {
     if (index >= size()) throw std::out_of_range("index item out of range");
-    return record(data_, index).scale_bytes;
+    return record(bytes(), index).scale_bytes;
 }
 
 }  // namespace cpp_rag

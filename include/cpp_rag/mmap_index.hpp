@@ -28,8 +28,13 @@ public:
 
     static void write(const std::string& path, std::span<const IndexItem> items);
 
-    [[nodiscard]] std::size_t size() const noexcept;
-    [[nodiscard]] std::size_t dimensions() const noexcept;
+    // A default-constructed, closed or moved-from index is not mapped: is_open()
+    // returns false and every accessor throws std::logic_error until the object is
+    // assigned an open index.
+    [[nodiscard]] bool is_open() const noexcept { return data_ != nullptr; }
+
+    [[nodiscard]] std::size_t size() const;
+    [[nodiscard]] std::size_t dimensions() const;
     [[nodiscard]] Chunk chunk(std::size_t index) const;
     [[nodiscard]] std::span<const float> embedding(std::size_t index) const;
     [[nodiscard]] float norm(std::size_t index) const;
@@ -39,6 +44,8 @@ public:
 private:
     void close() noexcept;
     void validate();
+    // Mapped bytes; throws std::logic_error when the index is not open.
+    [[nodiscard]] const std::byte* bytes() const;
 
     int fd_{-1};
     const std::byte* data_{nullptr};

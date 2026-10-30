@@ -12,12 +12,28 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace {
 
 void check(bool condition, const char* message) {
     if (!condition) throw std::runtime_error(message);
+}
+
+template <typename Exception, typename Callable>
+void expect_throws(Callable&& call, std::string_view reason) {
+    std::string error;
+    bool threw = false;
+    try {
+        call();
+    } catch (const Exception& exception) {
+        threw = true;
+        error = exception.what();
+    }
+    check(threw, "expected an exception but none was thrown");
+    const std::string message = "unexpected exception message: " + error;
+    check(error.find(reason) != std::string::npos, message.c_str());
 }
 
 void test_chunking() {
@@ -200,6 +216,57 @@ void expect_rejected(const std::string& path, std::string_view reason) {
     check(error.find(reason) != std::string::npos, message.c_str());
 }
 
+void test_index_closed_state() {
+    const auto path = (std::filesystem::temp_directory_path() / "cpp-rag-closed.index").string();
+    const std::vector<cpp_rag::IndexItem> items{
+        {{"a.txt", "first", 0, 5}, {1.0F, 0.0F}},
+        {{"b.txt", "second", 10, 16}, {0.0F, 1.0F}},
+    };
+    cpp_rag::MmapIndex::write(path, items);
+
+    // A default-constructed index has no mapping; accessors must diagnose that
+    // instead of dereferencing null.
+    cpp_rag::MmapIndex closed;
+    check(!closed.is_open(), "default-constructed index should be closed");
+    expect_throws<std::logic_error>([&] { (void)closed.size(); }, "not open");
+    expect_throws<std::logic_error>([&] { (void)closed.dimensions(); }, "not open");
+    expect_throws<std::logic_error>([&] { (void)closed.chunk(0); }, "not open");
+    expect_throws<std::logic_error>([&] { (void)closed.embedding(0); }, "not open");
+    expect_throws<std::logic_error>([&] { (void)closed.norm(0); }, "not open");
+    expect_throws<std::logic_error>([&] { (void)closed.scale(0); }, "not open");
+    expect_throws<std::logic_error>([&] { (void)closed.scale_bytes(0); }, "not open");
+    const std::vector<float> no_query;
+    expect_throws<std::logic_error>([&] { (void)cpp_rag::search(closed, no_query, 3); },
+                                    "not open");
+
+    // Moving leaves the source closed but usable as a closed object.
+    cpp_rag::MmapIndex source(path);
+    check(source.is_open() && source.size() == 2, "opened index is not usable");
+    cpp_rag::MmapIndex moved(std::move(source));
+    check(!source.is_open(), "moved-from index should report closed");
+    check(moved.is_open() && moved.size() == 2, "move-constructed index lost the mapping");
+    check(moved.chunk(1).text == "second", "move-constructed index returned wrong data");
+    expect_throws<std::logic_error>([&] { (void)source.size(); }, "not open");
+    expect_throws<std::logic_error>([&] { (void)source.chunk(0); }, "not open");
+
+    cpp_rag::MmapIndex assigned;
+    assigned = std::move(moved);
+    check(!moved.is_open(), "move-assigned source should report closed");
+    check(assigned.is_open() && assigned.dimensions() == 2, "move-assigned index is broken");
+    expect_throws<std::out_of_range>([&] { (void)assigned.chunk(99); }, "out of range");
+
+    // A closed index can be reopened by move assignment, and self-assignment must
+    // not tear down the mapping.
+    cpp_rag::MmapIndex reopened;
+    reopened = cpp_rag::MmapIndex(path);
+    check(reopened.is_open() && reopened.size() == 2, "reopened index is broken");
+    auto& alias = reopened;
+    reopened = std::move(alias);
+    check(reopened.is_open() && reopened.size() == 2, "self move-assignment closed the index");
+
+    std::filesystem::remove(path);
+}
+
 void test_index_rejects_corrupt_headers() {
     const auto path = (std::filesystem::temp_directory_path() / "cpp-rag-corrupt.index").string();
     const std::vector<cpp_rag::IndexItem> items{
@@ -336,6 +403,7 @@ int main() {
         test_chunking_large_overlap();
         test_index_and_search();
         test_index_rejects_corrupt_headers();
+        test_index_closed_state();
         test_prompt_assembly();
         test_search_retains_best_top_k();
         test_multi_scale_search_ordering();

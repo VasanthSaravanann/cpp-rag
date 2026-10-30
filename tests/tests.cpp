@@ -147,6 +147,67 @@ void test_prompt_assembly() {
     check(prompt.size() == expected.size(), "assembled prompt size is wrong");
 }
 
+void test_chat_prompt() {
+    const auto prompt = cpp_rag::build_chat_prompt("be brief", "hi");
+    const std::string expected =
+        "<|im_start|>system\n"
+        "be brief<|im_end|>\n"
+        "<|im_start|>user\n"
+        "hi<|im_end|>\n"
+        "<|im_start|>assistant\n";
+    check(prompt == expected, "chat prompt does not match the ChatML layout");
+
+    // An empty system turn is still emitted so the template stays predictable.
+    const auto no_system = cpp_rag::build_chat_prompt("", "hi");
+    check(no_system.rfind("<|im_start|>system\n<|im_end|>\n", 0) == 0,
+          "empty system turn is not ChatML");
+}
+
+void test_prompt_budget_and_system_omission() {
+    const std::string first_text = "First fact.";
+    const std::string second_text = "Second fact.";
+    const std::vector<cpp_rag::PromptChunk> chunks{{"101-A", first_text}, {"101-B", second_text}};
+
+    // No system prompt: the system section is omitted entirely, not left empty.
+    const auto plain = cpp_rag::build_rag_prompt("", chunks, "why?");
+    const std::string plain_expected =
+        "[RETRIEVED CONTEXT]\n"
+        "[Chunk ID: 101-A]\n"
+        "First fact.\n\n"
+        "[Chunk ID: 101-B]\n"
+        "Second fact.\n\n"
+        "[USER QUERY]\n"
+        "why?";
+    check(plain == plain_expected, "empty system prompt still emits a system section");
+
+    // The default budget is unbounded, so the existing three-argument behaviour is
+    // unchanged (test_prompt_assembly pins those exact bytes).
+    check(cpp_rag::build_rag_prompt("sys", chunks, "why?") ==
+              cpp_rag::build_rag_prompt("sys", chunks, "why?", 0),
+          "zero budget changed the assembled prompt");
+
+    // A budget that fits exactly the first chunk drops the second one. With a system
+    // prompt present the context header carries the separating blank line.
+    const std::string header = "\n\n[RETRIEVED CONTEXT]\n";
+    const std::string first_block = "[Chunk ID: 101-A]\n" + first_text + "\n\n";
+    const auto one_chunk =
+        cpp_rag::build_rag_prompt("sys", chunks, "why?", header.size() + first_block.size());
+    check(one_chunk.find("[Chunk ID: 101-A]") != std::string::npos,
+          "budget dropped the chunk that fits");
+    check(one_chunk.find("[Chunk ID: 101-B]") == std::string::npos,
+          "budget kept a chunk that does not fit");
+    check(one_chunk.find("[USER QUERY]\nwhy?") != std::string::npos,
+          "budget dropped the user query");
+
+    // A budget smaller than the first chunk still keeps the headers and query.
+    const auto no_chunks = cpp_rag::build_rag_prompt("sys", chunks, "why?", header.size());
+    check(no_chunks.find("[Chunk ID:") == std::string::npos,
+          "over-tight budget still emitted a chunk");
+    check(no_chunks.find("[RETRIEVED CONTEXT]") != std::string::npos &&
+              no_chunks.find("[USER QUERY]\nwhy?") != std::string::npos,
+          "over-tight budget dropped the fixed sections");
+}
+
 void test_search_retains_best_top_k() {
     const auto path = (std::filesystem::temp_directory_path() / "cpp-rag-topk.index").string();
     const std::vector<cpp_rag::IndexItem> items{
@@ -405,6 +466,8 @@ int main() {
         test_index_rejects_corrupt_headers();
         test_index_closed_state();
         test_prompt_assembly();
+        test_chat_prompt();
+        test_prompt_budget_and_system_omission();
         test_search_retains_best_top_k();
         test_multi_scale_search_ordering();
         std::cout << "all tests passed\n";

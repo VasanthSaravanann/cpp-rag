@@ -58,6 +58,23 @@ Results are returned in descending score order; equal scores are ordered by item
   --top-k 6 --per-scale 2
 ```
 
+## Ask: retrieve, assemble, generate
+
+`ask` runs the whole pipeline: it embeds the query, searches the index, assembles the retrieved chunks into a prompt, and generates an answer. It needs an embedding model and a generation model, and they are loaded one after the other so only one is resident at a time:
+
+```sh
+./build/cpp-rag ask \
+  --model models/bge-small-en-v1.5-f16.gguf \
+  --generator models/Qwen2.5-3B-Instruct-Q4_K_M.gguf \
+  --index docs.ragidx \
+  --query "How is the index stored?" \
+  --top-k 5 --ctx 4096 --max-tokens 256 --gpu-layers 99
+```
+
+stdout is the answer only; retrieved context (score, chunk id, scale, rank) goes to stderr so the answer can be piped. `--system TEXT` replaces the default instruction. The prompt is wrapped in the ChatML template the Instruct model expects, and generation stops at the turn markers, which are stripped from the output.
+
+The retrieved context is trimmed to fit `--ctx`: chunks are dropped from the least relevant end until prompt plus `--max-tokens` fits, and `ask` reports how many survived. `--embed-ctx N` sets the embedding context separately from the generation context (`--ctx`) when a small generation window would not fit a chunk. The prompt assembly itself is a draft: see `include/cpp_rag/prompt_builder.hpp`.
+
 The index stores fixed-size records, contiguous `float32` vectors, source metadata, and original chunk text. It is atomically written and opened read-only with POSIX `mmap`; vectors are searched without deserialization. The dot-product kernel uses ARM NEON on Apple Silicon, SSE2 on x86-64, and a scalar tail/fallback.
 
 ## Generate with Qwen2.5-3B-Instruct
@@ -72,7 +89,7 @@ Use a local Qwen2.5-3B-Instruct GGUF file. The command loads the model and causa
   --gpu-layers 99
 ```
 
-`--prompt` is passed as already-formatted text. For the RAG layout, first construct it with `build_rag_prompt()` from `include/cpp_rag/prompt_builder.hpp`; the returned `std::string` is contiguous and can be passed directly to `LlamaGenerator::generate()`. Generation uses greedy sampling for deterministic output and fails rather than truncating when prompt plus response capacity exceeds `--ctx`.
+`--prompt` is passed as already-formatted text unless `--chat` is given, which wraps it in the ChatML template with an optional `--system TEXT` and stops generation at the turn markers instead of running into the next turn. For the RAG layout, construct it with `build_rag_prompt()` from `include/cpp_rag/prompt_builder.hpp`; the returned `std::string` is contiguous and can be passed directly to `LlamaGenerator::generate()`, whose third argument takes stop sequences. Generation uses greedy sampling for deterministic output and fails rather than truncating when prompt plus response capacity exceeds `--ctx`.
 
 ## File format
 

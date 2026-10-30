@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -27,8 +28,11 @@ public:
     LlamaGenerator& operator=(const LlamaGenerator&) = delete;
 
     [[nodiscard]] std::vector<std::int32_t> tokenize(std::string_view prompt) const;
+    // Greedy generation. Stops at end of generation or as soon as any stop sequence
+    // appears in the response; the sequence and everything after it is dropped.
     [[nodiscard]] std::string generate(std::string_view prompt,
-                                       std::size_t max_response_tokens = 256);
+                                       std::size_t max_response_tokens = 256,
+                                       std::span<const std::string> stop_sequences = {});
     [[nodiscard]] std::size_t context_size() const noexcept;
 
 private:

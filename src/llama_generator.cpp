@@ -20,6 +20,35 @@ namespace cpp_rag {
 #if defined(CPP_RAG_WITH_LLAMA)
 namespace {
 
+// Drops a truncated stop marker left when generation stops on the token budget, for
+// example "<|im_end" without its closing bracket.
+void trim_partial_stop(std::string& response, std::span<const std::string> stop_sequences) {
+    std::size_t longest = 0;
+    for (const auto& stop : stop_sequences) {
+        const auto limit = std::min(stop.empty() ? 0 : stop.size() - 1, response.size());
+        for (std::size_t length = limit; length > longest; --length) {
+            if (response.compare(response.size() - length, length, stop, 0, length) == 0) {
+                longest = length;
+                break;
+            }
+        }
+    }
+    if (longest > 0) response.resize(response.size() - longest);
+}
+
+// Cuts the response at the earliest stop sequence and reports whether one matched.
+bool truncate_at_stop(std::string& response, std::span<const std::string> stop_sequences) {
+    std::size_t earliest = std::string::npos;
+    for (const auto& stop : stop_sequences) {
+        if (stop.empty()) continue;
+        const auto position = response.find(stop);
+        if (position != std::string::npos && position < earliest) earliest = position;
+    }
+    if (earliest == std::string::npos) return false;
+    response.resize(earliest);
+    return true;
+}
+
 std::string token_piece(const llama_vocab* vocab, llama_token token) {
     std::array<char, 256> buffer{};
     auto count = llama_token_to_piece(vocab, token, buffer.data(),
@@ -176,7 +205,8 @@ std::size_t LlamaGenerator::context_size() const noexcept {
 #endif
 }
 
-std::string LlamaGenerator::generate(std::string_view prompt, std::size_t max_response_tokens) {
+std::string LlamaGenerator::generate(std::string_view prompt, std::size_t max_response_tokens,
+                                   std::span<const std::string> stop_sequences) {
 #if defined(CPP_RAG_WITH_LLAMA)
     auto prompt_tokens = impl_->tokenize(prompt);
     if (prompt_tokens.empty()) throw std::runtime_error("prompt produced no tokens");
@@ -198,6 +228,10 @@ std::string LlamaGenerator::generate(std::string_view prompt, std::size_t max_re
             const auto token = llama_sampler_sample(sampler, impl_->context, -1);
             if (llama_vocab_is_eog(impl_->vocab, token)) break;
             response.append(token_piece(impl_->vocab, token));
+            // Turn markers such as <|im_end|> are ordinary text for some GGUFs, so
+            // generation has to stop on them explicitly instead of running into the
+            // next turn.
+            if (truncate_at_stop(response, stop_sequences)) break;
 
             response_batch.n_tokens = 1;
             response_batch.token[0] = token;
@@ -216,10 +250,12 @@ std::string LlamaGenerator::generate(std::string_view prompt, std::size_t max_re
     }
     llama_batch_free(response_batch);
     llama_sampler_free(sampler);
+    trim_partial_stop(response, stop_sequences);
     return response;
 #else
     (void)prompt;
     (void)max_response_tokens;
+    (void)stop_sequences;
     throw std::runtime_error("llama.cpp support is unavailable");
 #endif
 }

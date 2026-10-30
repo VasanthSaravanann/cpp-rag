@@ -11,6 +11,7 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <span>
 #include <thread>
 #endif
 
@@ -100,6 +101,48 @@ struct LlamaEmbedder::Impl {
         tokens.resize(static_cast<std::size_t>(count));
         return tokens;
     }
+
+    std::vector<llama_token> tokens_for(std::string_view text) const {
+        auto tokens = tokenize(text);
+        if (tokens.empty()) throw std::invalid_argument("cannot embed empty text");
+        if (tokens.size() > static_cast<std::size_t>(llama_n_batch(context))) {
+            throw std::runtime_error(
+                "input exceeds embedding context; reduce chunk size or increase --ctx");
+        }
+        return tokens;
+    }
+
+    // Decodes one text into the pre-allocated batch and returns its pooled embedding.
+    std::vector<float> pooled(std::span<const llama_token> tokens, llama_batch& batch) {
+        batch.n_tokens = static_cast<std::int32_t>(tokens.size());
+        for (std::size_t i = 0; i < tokens.size(); ++i) {
+            batch.token[i] = tokens[i];
+            batch.pos[i] = static_cast<llama_pos>(i);
+            batch.n_seq_id[i] = 1;
+            batch.seq_id[i][0] = 0;
+            batch.logits[i] = 1;
+        }
+
+        if (auto memory = llama_get_memory(context); memory != nullptr) {
+            llama_memory_clear(memory, false);
+        }
+        const int result =
+            llama_model_has_encoder(model) && !llama_model_has_decoder(model)
+            ? llama_encode(context, batch)
+            : llama_decode(context, batch);
+        if (result != 0) throw std::runtime_error("llama.cpp failed to compute embedding");
+
+        const auto* values = llama_get_embeddings_seq(context, 0);
+        if (values == nullptr) throw std::runtime_error("llama.cpp returned no pooled embedding");
+        std::vector<float> embedding(values, values + dimensions);
+        double squared_norm = 0.0;
+        for (const auto value : embedding) squared_norm += static_cast<double>(value) * value;
+        const auto norm = static_cast<float>(std::sqrt(squared_norm));
+        if (norm > 0.0F) {
+            for (auto& value : embedding) value /= norm;
+        }
+        return embedding;
+    }
 #endif
 };
 
@@ -116,44 +159,16 @@ std::size_t LlamaEmbedder::dimensions() const noexcept { return impl_->dimension
 
 std::vector<float> LlamaEmbedder::embed(std::string_view text) {
 #if defined(CPP_RAG_WITH_LLAMA)
-    auto tokens = impl_->tokenize(text);
-    if (tokens.empty()) throw std::invalid_argument("cannot embed empty text");
-    if (tokens.size() > llama_n_batch(impl_->context)) {
-        throw std::runtime_error("input exceeds embedding context; reduce chunk size or increase --ctx");
-    }
-
+    auto tokens = impl_->tokens_for(text);
     auto batch = llama_batch_init(static_cast<std::int32_t>(tokens.size()), 0, 1);
-    batch.n_tokens = static_cast<std::int32_t>(tokens.size());
-    for (std::size_t i = 0; i < tokens.size(); ++i) {
-        batch.token[i] = tokens[i];
-        batch.pos[i] = static_cast<llama_pos>(i);
-        batch.n_seq_id[i] = 1;
-        batch.seq_id[i][0] = 0;
-        batch.logits[i] = 1;
+    try {
+        auto embedding = impl_->pooled(tokens, batch);
+        llama_batch_free(batch);
+        return embedding;
+    } catch (...) {
+        llama_batch_free(batch);
+        throw;
     }
-
-    if (auto memory = llama_get_memory(impl_->context); memory != nullptr) {
-        llama_memory_clear(memory, false);
-    }
-    int result = 0;
-    if (llama_model_has_encoder(impl_->model) && !llama_model_has_decoder(impl_->model)) {
-        result = llama_encode(impl_->context, batch);
-    } else {
-        result = llama_decode(impl_->context, batch);
-    }
-    llama_batch_free(batch);
-    if (result != 0) throw std::runtime_error("llama.cpp failed to compute embedding");
-
-    const auto* values = llama_get_embeddings_seq(impl_->context, 0);
-    if (values == nullptr) throw std::runtime_error("llama.cpp returned no pooled embedding");
-    std::vector<float> embedding(values, values + impl_->dimensions);
-    double squared_norm = 0.0;
-    for (const auto value : embedding) squared_norm += static_cast<double>(value) * value;
-    const auto norm = static_cast<float>(std::sqrt(squared_norm));
-    if (norm > 0.0F) {
-        for (auto& value : embedding) value /= norm;
-    }
-    return embedding;
 #else
     (void)text;
     throw std::runtime_error("llama.cpp support is unavailable");
@@ -161,10 +176,36 @@ std::vector<float> LlamaEmbedder::embed(std::string_view text) {
 }
 
 std::vector<std::vector<float>> LlamaEmbedder::embed_all(std::span<const std::string> texts) {
+#if defined(CPP_RAG_WITH_LLAMA)
+    // Tokenize everything first so a single batch allocation covers every text. The
+    // texts are still decoded one at a time: pooled multi-sequence batches would need
+    // n_seq_max at context construction and multiply the context memory.
+    std::vector<std::vector<llama_token>> tokenized;
+    tokenized.reserve(texts.size());
+    std::size_t capacity = 0;
+    for (const auto& text : texts) {
+        tokenized.push_back(impl_->tokens_for(text));
+        capacity = std::max(capacity, tokenized.back().size());
+    }
     std::vector<std::vector<float>> embeddings;
     embeddings.reserve(texts.size());
-    for (const auto& text : texts) embeddings.push_back(embed(text));
+    if (tokenized.empty()) return embeddings;
+
+    auto batch = llama_batch_init(static_cast<std::int32_t>(capacity), 0, 1);
+    try {
+        for (const auto& tokens : tokenized) {
+            embeddings.push_back(impl_->pooled(tokens, batch));
+        }
+    } catch (...) {
+        llama_batch_free(batch);
+        throw;
+    }
+    llama_batch_free(batch);
     return embeddings;
+#else
+    (void)texts;
+    throw std::runtime_error("llama.cpp support is unavailable");
+#endif
 }
 
 }  // namespace cpp_rag

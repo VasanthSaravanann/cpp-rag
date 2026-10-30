@@ -64,6 +64,10 @@ struct Arguments {
         << "  cpp-rag generate --model QWEN.gguf --prompt TEXT [--chat] [--system TEXT]\n"
         << "                   [--max-tokens N] [--ctx N] [--batch N]\n"
         << "Common model options: [--gpu-layers N] [--threads N]\n";
+#ifndef CPP_RAG_WITH_LLAMA
+    std::cerr << "\nThis binary was built with CPP_RAG_WITH_LLAMA=OFF: every command needs an\n"
+                 "embedding model, so none of them can run. Build with llama.cpp for the CLI.\n";
+#endif
     std::exit(error.empty() ? 0 : 2);
 }
 

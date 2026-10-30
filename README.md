@@ -14,13 +14,15 @@ cmake --build build -j
 
 When `LLAMA_CPP_DIR` is omitted, CMake `FetchContent` downloads the pinned llama.cpp revision. Only `libllama` and its required GGML targets are built; llama.cpp tools, examples, tests, and server are disabled.
 
-To work on storage/search without llama.cpp or network access:
+To build and test the storage/search core without llama.cpp or network access:
 
 ```sh
 cmake -S . -B build-core -DCPP_RAG_WITH_LLAMA=OFF
 cmake --build build-core -j
 ctest --test-dir build-core --output-on-failure
 ```
+
+That tree builds `cpp_rag_core` and the unit tests, which cover chunking, the index format and search. The `cpp-rag` binary it also produces is inert by design: every command exits with `this binary was built with CPP_RAG_WITH_LLAMA=OFF`, because indexing, querying and generation all need an embedding model. Build the llama.cpp tree for a usable CLI.
 
 Editor tooling reads compile flags through `.clangd` from the `build/` tree, so the llama translation units get `llama.h` and `CPP_RAG_WITH_LLAMA` defined. Configuring only `build-core` still parses the core sources, but clangd then borrows a command from another file for the llama sources and treats their llama-only code as inactive.
 

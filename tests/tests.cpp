@@ -10,7 +10,9 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
+#include <system_error>
 #include <string>
 #include <string_view>
 #include <utility>

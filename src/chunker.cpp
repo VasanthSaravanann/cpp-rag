@@ -6,6 +6,7 @@
 #include <cctype>
 #include <limits>
 #include <stdexcept>
+#include <utility>
 
 namespace cpp_rag {
 namespace {

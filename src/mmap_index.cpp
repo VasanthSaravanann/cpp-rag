@@ -1,5 +1,6 @@
 #include "cpp_rag/mmap_index.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <filesystem>

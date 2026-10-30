@@ -2,6 +2,7 @@
 
 #if defined(CPP_RAG_WITH_LLAMA)
 #include "llama.h"
+#include "llama_backend.hpp"
 #endif
 
 #include <stdexcept>
@@ -69,6 +70,8 @@ std::string token_piece(const llama_vocab* vocab, llama_token token) {
 
 struct LlamaGenerator::Impl {
 #if defined(CPP_RAG_WITH_LLAMA)
+    // Declared first so it outlives the model and context it keeps alive.
+    detail::LlamaBackendGuard backend;
     llama_model* model{};
     llama_context* context{};
     const llama_vocab* vocab{};
@@ -87,12 +90,10 @@ struct LlamaGenerator::Impl {
             throw std::runtime_error("Qwen GGUF model file does not exist: " + model_path);
         }
 
-        llama_backend_init();
         auto model_params = llama_model_default_params();
         model_params.n_gpu_layers = options.gpu_layers;
         model = llama_model_load_from_file(model_path.c_str(), model_params);
         if (model == nullptr) {
-            llama_backend_free();
             throw std::runtime_error("unable to load Qwen GGUF model: " + model_path);
         }
 
@@ -111,7 +112,6 @@ struct LlamaGenerator::Impl {
         if (context == nullptr) {
             llama_model_free(model);
             model = nullptr;
-            llama_backend_free();
             throw std::runtime_error("unable to create llama.cpp generation context");
         }
         vocab = llama_model_get_vocab(model);
@@ -129,7 +129,6 @@ struct LlamaGenerator::Impl {
 #if defined(CPP_RAG_WITH_LLAMA)
         if (context != nullptr) llama_free(context);
         if (model != nullptr) llama_model_free(model);
-        llama_backend_free();
 #endif
     }
 

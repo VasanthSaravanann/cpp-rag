@@ -2,6 +2,7 @@
 
 #if defined(CPP_RAG_WITH_LLAMA)
 #include "llama.h"
+#include "llama_backend.hpp"
 #endif
 
 #include <stdexcept>
@@ -19,6 +20,8 @@ namespace cpp_rag {
 
 struct LlamaEmbedder::Impl {
 #if defined(CPP_RAG_WITH_LLAMA)
+    // Declared first so it outlives the model and context it keeps alive.
+    detail::LlamaBackendGuard backend;
     llama_model* model{};
     llama_context* context{};
 #endif
@@ -26,12 +29,10 @@ struct LlamaEmbedder::Impl {
 
     Impl(const std::string& model_path, const Options& options) {
 #if defined(CPP_RAG_WITH_LLAMA)
-        llama_backend_init();
         auto model_params = llama_model_default_params();
         model_params.n_gpu_layers = options.gpu_layers;
         model = llama_model_load_from_file(model_path.c_str(), model_params);
         if (model == nullptr) {
-            llama_backend_free();
             throw std::runtime_error("unable to load GGUF model: " + model_path);
         }
 
@@ -52,7 +53,6 @@ struct LlamaEmbedder::Impl {
         if (context == nullptr) {
             llama_model_free(model);
             model = nullptr;
-            llama_backend_free();
             throw std::runtime_error("unable to create llama.cpp embedding context");
         }
         dimensions = static_cast<std::size_t>(llama_model_n_embd_out(model));
@@ -61,7 +61,6 @@ struct LlamaEmbedder::Impl {
             context = nullptr;
             llama_model_free(model);
             model = nullptr;
-            llama_backend_free();
             throw std::runtime_error("model does not provide pooled embeddings");
         }
 #else
@@ -77,7 +76,6 @@ struct LlamaEmbedder::Impl {
 #if defined(CPP_RAG_WITH_LLAMA)
         if (context != nullptr) llama_free(context);
         if (model != nullptr) llama_model_free(model);
-        llama_backend_free();
 #endif
     }
 

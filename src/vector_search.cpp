@@ -60,9 +60,29 @@ float cosine_similarity(std::span<const float> lhs, std::span<const float> rhs) 
     return product / (lhs_norm * rhs_norm);
 }
 
+namespace {
+
+struct LowerScoreFirst {
+    bool operator()(const SearchResult& lhs, const SearchResult& rhs) const {
+        return lhs.score > rhs.score;
+    }
+};
+
+using ResultHeap =
+    std::priority_queue<SearchResult, std::vector<SearchResult>, LowerScoreFirst>;
+
+// Stronger score first; equal scores fall back to the lower index so results are
+// deterministic across runs and platforms.
+bool better_result(const SearchResult& lhs, const SearchResult& rhs) {
+    if (lhs.score != rhs.score) return lhs.score > rhs.score;
+    return lhs.index < rhs.index;
+}
+
+}  // namespace
+
 std::vector<SearchResult> search(const MmapIndex& index,
                                  std::span<const float> query,
-                                 std::size_t top_k, Metric metric) {
+                                 std::size_t top_k, const SearchOptions& options) {
     if (query.size() != index.dimensions()) {
         throw std::invalid_argument("query dimensions do not match index");
     }
@@ -71,7 +91,7 @@ std::vector<SearchResult> search(const MmapIndex& index,
     }
 
     float query_norm = 1.0F;
-    if (metric == Metric::cosine) {
+    if (options.metric == Metric::cosine) {
         query_norm = std::sqrt(dot_product(query, query));
         if (query_norm == 0.0F) {
             return {};
@@ -79,25 +99,26 @@ std::vector<SearchResult> search(const MmapIndex& index,
     }
 
     top_k = std::min(top_k, index.size());
+    // The global top-k is always contained in the union of the per-scale top-k, so
+    // one heap per scale is enough. In max_per_scale mode only the per-scale leaders
+    // can be returned, so the heaps only need to hold that many.
+    const auto heap_size = options.max_per_scale == 0
+        ? top_k
+        : std::min(top_k, options.max_per_scale);
 
-    struct LowerScoreFirst {
-        bool operator()(const SearchResult& lhs, const SearchResult& rhs) const {
-            return lhs.score > rhs.score;
-        }
-    };
-    using ResultHeap =
-        std::priority_queue<SearchResult, std::vector<SearchResult>, LowerScoreFirst>;
     std::map<std::uint32_t, ResultHeap> per_scale;
-
     for (std::size_t i = 0; i < index.size(); ++i) {
         auto score = dot_product(index.embedding(i), query);
-        if (metric == Metric::cosine) {
+        if (options.metric == Metric::cosine) {
             const auto item_norm = index.norm(i);
             score = item_norm == 0.0F ? 0.0F : score / (item_norm * query_norm);
         }
+        // A non-finite score would break the strict weak ordering the sort relies on.
+        if (!std::isfinite(score)) continue;
+
         SearchResult candidate{i, score, index.scale(i), index.scale_bytes(i), 0};
         auto& best = per_scale[candidate.scale];
-        if (best.size() < top_k) {
+        if (best.size() < heap_size) {
             best.push(candidate);
         } else if (score > best.top().score) {
             best.pop();
@@ -105,40 +126,30 @@ std::vector<SearchResult> search(const MmapIndex& index,
         }
     }
 
-    std::map<std::uint32_t, std::vector<SearchResult>> ranked_scales;
+    std::vector<SearchResult> results;
+    results.reserve(per_scale.size() * heap_size);
     for (auto& [scale, heap] : per_scale) {
-        auto& ranked = ranked_scales[scale];
-        ranked.reserve(heap.size());
+        (void)scale;
         while (!heap.empty()) {
-            ranked.push_back(heap.top());
+            results.push_back(heap.top());
             heap.pop();
         }
-        std::sort(ranked.begin(), ranked.end(),
-                  [](const auto& lhs, const auto& rhs) { return lhs.score > rhs.score; });
-        for (std::size_t rank = 0; rank < ranked.size(); ++rank) {
-            ranked[rank].rank_within_scale = rank + 1;
-        }
+    }
+    std::sort(results.begin(), results.end(), better_result);
+
+    std::map<std::uint32_t, std::size_t> scale_rank;
+    for (auto& result : results) {
+        result.rank_within_scale = ++scale_rank[result.scale];
     }
 
-    std::vector<SearchResult> results;
-    results.reserve(top_k);
-    for (std::size_t rank = 0; results.size() < top_k; ++rank) {
-        std::vector<SearchResult> round;
-        for (const auto& [scale, ranked] : ranked_scales) {
-            (void)scale;
-            if (rank < ranked.size()) round.push_back(ranked[rank]);
-        }
-        if (round.empty()) break;
-        std::sort(round.begin(), round.end(), [](const auto& lhs, const auto& rhs) {
-            if (lhs.score != rhs.score) return lhs.score > rhs.score;
-            return lhs.scale < rhs.scale;
-        });
-        for (const auto& candidate : round) {
-            if (results.size() == top_k) break;
-            results.push_back(candidate);
-        }
-    }
+    if (results.size() > top_k) results.resize(top_k);
     return results;
+}
+
+std::vector<SearchResult> search(const MmapIndex& index,
+                                 std::span<const float> query,
+                                 std::size_t top_k, Metric metric) {
+    return search(index, query, top_k, SearchOptions{metric, 0});
 }
 
 }  // namespace cpp_rag

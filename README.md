@@ -46,6 +46,18 @@ Use an embedding GGUF model with pooling support, such as a BGE model converted 
   --top-k 5 --metric cosine
 ```
 
+Results are returned in descending score order; equal scores are ordered by item index, so output is deterministic. Each result reports the chunk scale it came from and its 1-based rank within that scale. Items whose score is not finite are skipped.
+
+`--per-scale N` caps how many results may come from any single chunk scale, which is useful when an index holds overlapping multi-scale chunks. Results stay score-ordered and the query may then return fewer than `--top-k` entries:
+
+```sh
+./build/cpp-rag query \
+  --model models/bge-small-en-v1.5-f16.gguf \
+  --index docs.ragidx \
+  --query "How is the index stored?" \
+  --top-k 6 --per-scale 2
+```
+
 The index stores fixed-size records, contiguous `float32` vectors, source metadata, and original chunk text. It is atomically written and opened read-only with POSIX `mmap`; vectors are searched without deserialization. The dot-product kernel uses ARM NEON on Apple Silicon, SSE2 on x86-64, and a scalar tail/fallback.
 
 ## Generate with Qwen2.5-3B-Instruct

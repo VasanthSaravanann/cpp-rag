@@ -30,6 +30,7 @@ struct Arguments {
     std::size_t batch_tokens{512};
     std::size_t max_response_tokens{256};
     std::size_t top_k{5};
+    std::size_t per_scale{0};
     int gpu_layers{0};
     int threads{0};
     cpp_rag::Metric metric{cpp_rag::Metric::cosine};
@@ -42,7 +43,7 @@ struct Arguments {
         << "  cpp-rag index --model MODEL.gguf --output INDEX --input FILE [--input FILE ...]\n"
         << "                [--chunk-bytes N] [--overlap-bytes N] [--ctx N]\n"
         << "  cpp-rag query --model MODEL.gguf --index INDEX --query TEXT [--top-k N]\n"
-        << "                [--metric cosine|dot] [--ctx N]\n"
+        << "                [--metric cosine|dot] [--per-scale N] [--ctx N]\n"
         << "  cpp-rag generate --model QWEN.gguf --prompt TEXT [--max-tokens N]\n"
         << "                   [--ctx N] [--batch N]\n"
         << "Common model options: [--gpu-layers N] [--threads N]\n";
@@ -82,6 +83,7 @@ Arguments parse(int argc, char** argv) {
         else if (option == "--batch") args.batch_tokens = size_value(option, value);
         else if (option == "--max-tokens") args.max_response_tokens = size_value(option, value);
         else if (option == "--top-k") args.top_k = size_value(option, value);
+        else if (option == "--per-scale") args.per_scale = size_value(option, value);
         else if (option == "--gpu-layers") args.gpu_layers = static_cast<int>(size_value(option, value));
         else if (option == "--threads") args.threads = static_cast<int>(size_value(option, value));
         else if (option == "--metric") {
@@ -123,11 +125,15 @@ void run_query(const Arguments& args) {
     auto embedder = make_embedder(args);
     cpp_rag::MmapIndex index(args.index);
     auto query_embedding = embedder.embed(args.query);
-    const auto results = cpp_rag::search(index, query_embedding, args.top_k, args.metric);
+    const auto results = cpp_rag::search(
+        index, query_embedding, args.top_k,
+        cpp_rag::SearchOptions{args.metric, args.per_scale});
     for (const auto& result : results) {
         const auto chunk = index.chunk(result.index);
         std::cout << "score=" << result.score << " source=" << chunk.source
-                  << " bytes=" << chunk.byte_begin << '-' << chunk.byte_end << '\n'
+                  << " bytes=" << chunk.byte_begin << '-' << chunk.byte_end
+                  << " scale=" << result.scale << '/' << result.scale_bytes
+                  << " rank=" << result.rank_within_scale << '\n'
                   << chunk.text << "\n---\n";
     }
 }

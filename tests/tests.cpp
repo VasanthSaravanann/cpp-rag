@@ -147,6 +147,51 @@ void test_search_retains_best_top_k() {
     std::filesystem::remove(path);
 }
 
+void test_multi_scale_search_ordering() {
+    const auto path = (std::filesystem::temp_directory_path() / "cpp-rag-scale.index").string();
+    // Two chunk scales; the strongest results overall come from scale 0.
+    const std::vector<cpp_rag::IndexItem> items{
+        {{"a.txt", "fine 1", 0, 6, 0, 1000}, {1.0F, 0.0F}},
+        {{"b.txt", "fine 2", 0, 6, 0, 1000}, {0.94F, 0.0F}},
+        {{"c.txt", "coarse 1", 0, 8, 1, 200}, {0.90F, 0.0F}},
+        {{"d.txt", "coarse 2", 0, 8, 1, 200}, {0.89F, 0.0F}},
+    };
+    cpp_rag::MmapIndex::write(path, items);
+    cpp_rag::MmapIndex index(path);
+    const std::vector<float> query{1.0F, 0.0F};
+
+    // Default search is the global top-k, ordered by descending score. A scale's
+    // weaker result must never outrank a stronger result from another scale.
+    const auto results = cpp_rag::search(index, query, 3, cpp_rag::Metric::dot_product);
+    check(results.size() == 3, "multi-scale top-k should keep exactly three results");
+    check(results[0].index == 0 && results[1].index == 1 && results[2].index == 2,
+          "multi-scale results are not in descending score order");
+    check(results[0].rank_within_scale == 1 && results[1].rank_within_scale == 2,
+          "rank within scale 0 is wrong");
+    check(results[2].rank_within_scale == 1, "rank within scale 1 is wrong");
+    check(results[0].scale == 0 && results[2].scale == 1 && results[2].scale_bytes == 200,
+          "result scale metadata is wrong");
+
+    // Opt-in per-scale quota keeps results score-ordered and may return fewer than
+    // top_k, because scale 0 may contribute at most one result.
+    const auto balanced = cpp_rag::search(index, query, 3,
+                                          cpp_rag::SearchOptions{cpp_rag::Metric::dot_product, 1});
+    check(balanced.size() == 2, "per-scale quota should cap each scale to one result");
+    check(balanced[0].index == 0 && balanced[0].score == 1.0F, "quota result order is wrong");
+    check(balanced[1].index == 2 && balanced[1].score == 0.90F, "quota result order is wrong");
+    check(balanced[0].scale == 0 && balanced[1].scale == 1, "quota results must span scales");
+    // Ranks stay exact in quota mode: index 1 still ranks second within scale 0.
+    check(balanced[0].rank_within_scale == 1 && balanced[1].rank_within_scale == 1,
+          "quota rank within scale is wrong");
+
+    const auto wide = cpp_rag::search(index, query, 3,
+                                      cpp_rag::SearchOptions{cpp_rag::Metric::dot_product, 2});
+    check(wide.size() == 3 && wide[0].index == 0 && wide[1].index == 1 && wide[2].index == 2,
+          "per-scale quota of two should return the global top three");
+
+    std::filesystem::remove(path);
+}
+
 }  // namespace
 
 int main() {
@@ -156,6 +201,7 @@ int main() {
         test_index_and_search();
         test_prompt_assembly();
         test_search_retains_best_top_k();
+        test_multi_scale_search_ordering();
         std::cout << "all tests passed\n";
         return 0;
     } catch (const std::exception& error) {

@@ -36,6 +36,48 @@ void test_chunking() {
     }
 }
 
+void check_chunk_invariants(const std::string& text,
+                            const std::vector<cpp_rag::Chunk>& chunks,
+                            std::size_t max_bytes) {
+    check(!chunks.empty(), "expected at least one chunk");
+    check(chunks.front().byte_begin == 0, "first chunk offset is wrong");
+    check(chunks.back().byte_end == text.size(), "chunking did not cover the whole input");
+    for (std::size_t i = 0; i < chunks.size(); ++i) {
+        const auto& chunk = chunks[i];
+        check(chunk.byte_begin < chunk.byte_end, "chunk byte range is empty");
+        check(chunk.byte_end - chunk.byte_begin <= max_bytes, "chunk exceeds configured size");
+        check(chunk.text == text.substr(chunk.byte_begin, chunk.byte_end - chunk.byte_begin),
+              "chunk text and byte range differ");
+        check((static_cast<unsigned char>(chunk.text.front()) & 0xC0U) != 0x80U,
+              "chunk starts in a UTF-8 continuation byte");
+        if (i > 0) {
+            check(chunk.byte_begin > chunks[i - 1].byte_begin, "chunk offsets must advance");
+            check(chunk.byte_begin <= chunks[i - 1].byte_end,
+                  "chunk offsets must not skip input");
+        }
+    }
+}
+
+void test_chunking_large_overlap() {
+    // An early break can produce a chunk shorter than the requested overlap. The next
+    // start must still advance; previously it was recomputed as the same offset and the
+    // chunker repeated that chunk until the process ran out of memory.
+    std::string early_break(51, 'a');
+    early_break += ' ';
+    early_break += std::string(300, 'b');
+    check_chunk_invariants(early_break, cpp_rag::chunk_text(early_break, "early", {100, 90}),
+                           100);
+
+    // The largest accepted overlap must still make progress.
+    std::string dense(400, 'x');
+    check_chunk_invariants(dense, cpp_rag::chunk_text(dense, "dense", {32, 31}), 32);
+
+    // Overlap close to the chunk size must keep starts on code point boundaries.
+    std::string utf8;
+    for (int i = 0; i < 40; ++i) utf8 += "世界 ";
+    check_chunk_invariants(utf8, cpp_rag::chunk_text(utf8, "utf8", {10, 9}), 10);
+}
+
 void test_index_and_search() {
     const auto path = (std::filesystem::temp_directory_path() / "cpp-rag-test.index").string();
     const std::vector<cpp_rag::IndexItem> items{
@@ -110,6 +152,7 @@ void test_search_retains_best_top_k() {
 int main() {
     try {
         test_chunking();
+        test_chunking_large_overlap();
         test_index_and_search();
         test_prompt_assembly();
         test_search_retains_best_top_k();

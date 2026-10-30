@@ -65,10 +65,13 @@ std::vector<Chunk> chunk_text(std::string_view text, std::string source,
         if (end == text.size()) {
             break;
         }
-        begin = advance_to_codepoint(text, end - std::min(options.overlap_bytes, end));
-        if (begin >= end) {
-            begin = end;
-        }
+        // choose_end() can return a chunk shorter than the requested overlap. Clamping
+        // the overlap to end - 1 keeps the next start strictly after the current one,
+        // even after snapping it forward to a UTF-8 code point boundary. Without the
+        // clamp the next start can be recomputed as the current one and the loop
+        // repeats the same chunk until the process runs out of memory.
+        const auto overlap = std::min(options.overlap_bytes, end - begin - 1);
+        begin = advance_to_codepoint(text, end - overlap);
     }
     return chunks;
 }

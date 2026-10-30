@@ -24,6 +24,33 @@ ctest --test-dir build-core --output-on-failure
 
 Editor tooling reads compile flags through `.clangd` from the `build/` tree, so the llama translation units get `llama.h` and `CPP_RAG_WITH_LLAMA` defined. Configuring only `build-core` still parses the core sources, but clangd then borrows a command from another file for the llama sources and treats their llama-only code as inactive.
 
+## Models
+
+Model files are not distributed with this repository: `.gitignore` excludes `*.gguf`, so every example below assumes the file already exists under `models/`. Two roles are involved and they are not interchangeable:
+
+| Role | Used by | Needs |
+|---|---|---|
+| Embedding | `index`, `query`, `ask --model` | a GGUF that reports a pooling type |
+| Generation | `generate`, `ask --generator` | an instruct-tuned causal GGUF |
+
+The examples were run against these two artifacts, each verified by downloading it and comparing its SHA-256 with the digest published in the source repository's own file listing:
+
+| File | Source | Bytes | SHA-256 |
+|---|---|---|---|
+| `models/bge-small-en-v1.5-f16.gguf` | `CompendiumLabs/bge-small-en-v1.5-gguf`, MIT | 67,308,128 | `f0b2fef971e8366438bfd2d9aefea1b0115919389448806d290237f638bae999` |
+| `models/Qwen2.5-3B-Instruct-Q4_K_M.gguf` | `Qwen/Qwen2.5-3B-Instruct-GGUF`, Qwen licence | 2,104,932,768 | `626b4a6678b86442240e33df819e00132d3ba7dddfe1cdc4fbb18e0a9615c62d` |
+
+```sh
+mkdir -p models
+curl -L -o models/bge-small-en-v1.5-f16.gguf \
+  https://huggingface.co/CompendiumLabs/bge-small-en-v1.5-gguf/resolve/main/bge-small-en-v1.5-f16.gguf
+shasum -a 256 models/bge-small-en-v1.5-f16.gguf   # must print the digest above
+```
+
+Neither digest is an endorsement: pin the digests you have approved in your own manifest and re-verify after any download. To avoid a third-party re-upload, upstream `BAAI/bge-small-en-v1.5` (`model.safetensors`, 133,466,304 bytes, SHA-256 `3c9f31665447c8911517620762200d2245a2518d6e7208acc78cd9db317e21ad`) can be converted with llama.cpp's `convert_hf_to_gguf.py`, at the cost of needing Python and torch.
+
+A causal instruct model can be fed through the embedding path, and `ask` with the same file as `--model` and `--generator` does run, but the pooled mean of a decoder's token states is not a retrieval embedding and ranking quality is poor. Use that combination only as a smoke test.
+
 ## Index documents
 
 Use an embedding GGUF model with pooling support, such as a BGE model converted for llama.cpp:
@@ -36,7 +63,7 @@ Use an embedding GGUF model with pooling support, such as a BGE model converted 
   --chunk-bytes 1000 --overlap-bytes 150
 ```
 
-`--input` accepts UTF-8 text files and PDFs. PDF text is extracted per page with PDFKit on Apple platforms; the non-Apple build links a stub that rejects PDF input, so scanned PDFs and non-Apple hosts need their own extraction (no OCR is performed). A PDF with no extractable text is reported as an error rather than indexed empty.
+The `docs/*.txt` paths are placeholders; pass your own files (`--input README.md` indexes this README). `--input` accepts UTF-8 text files and PDFs. PDF text is extracted per page with PDFKit on Apple platforms; the non-Apple build links a stub that rejects PDF input, so scanned PDFs and non-Apple hosts need their own extraction (no OCR is performed). A PDF with no extractable text is reported as an error rather than indexed empty.
 
 `--gpu-layers N`, `--threads N`, and `--ctx N` configure model execution. Chunk limits are bytes, while `--ctx` is model tokens; if a chunk tokenizes beyond the context, reduce `--chunk-bytes`. Chunks are cut on UTF-8 code point boundaries and prefer the last whitespace within the second half of the window, so a chunk can be shorter than `--chunk-bytes`; `--overlap-bytes` must be smaller than `--chunk-bytes`. Chunks are embedded in order and never lost: the effective overlap shrinks when a short chunk cannot carry the requested overlap.
 

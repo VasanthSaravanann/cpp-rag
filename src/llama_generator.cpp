@@ -65,6 +65,21 @@ std::string token_piece(const llama_vocab* vocab, llama_token token) {
     return piece;
 }
 
+// Greedy when temperature is zero, otherwise a top-k/top-p/temperature chain.
+llama_sampler* make_sampler(float temperature, float top_p, std::uint32_t seed) {
+    if (!(temperature > 0.0f)) return llama_sampler_init_greedy();
+    auto* chain = llama_sampler_chain_init(llama_sampler_chain_default_params());
+    if (chain == nullptr) throw std::runtime_error("unable to create llama.cpp sampler chain");
+    // Mild repetition penalty: small instruct models loop on a verbatim context
+    // excerpt without it.
+    llama_sampler_chain_add(chain, llama_sampler_init_penalties(64, 1.1f, 0.0f, 0.0f));
+    llama_sampler_chain_add(chain, llama_sampler_init_top_k(40));
+    llama_sampler_chain_add(chain, llama_sampler_init_top_p(top_p, 1));
+    llama_sampler_chain_add(chain, llama_sampler_init_temp(temperature));
+    llama_sampler_chain_add(chain, llama_sampler_init_dist(seed));
+    return chain;
+}
+
 }  // namespace
 #endif
 
@@ -76,6 +91,9 @@ struct LlamaGenerator::Impl {
     llama_context* context{};
     const llama_vocab* vocab{};
     std::size_t batch_tokens{};
+    float temperature{};
+    float top_p{0.95f};
+    std::uint32_t seed{0xFFFFFFFFu};
 #endif
 
     Impl(const std::string& model_path, const Options& options) {
@@ -85,6 +103,16 @@ struct LlamaGenerator::Impl {
             options.batch_tokens > std::numeric_limits<std::uint32_t>::max()) {
             throw std::invalid_argument("context and batch token counts must be valid uint32 values");
         }
+        // The negated comparisons reject NaN as well.
+        if (!(options.temperature >= 0.0f)) {
+            throw std::invalid_argument("temperature must be a finite value >= 0");
+        }
+        if (!(options.top_p > 0.0f && options.top_p <= 1.0f)) {
+            throw std::invalid_argument("top_p must be in (0, 1]");
+        }
+        temperature = options.temperature;
+        top_p = options.top_p;
+        seed = options.seed;
 
         if (!std::filesystem::is_regular_file(model_path)) {
             throw std::runtime_error("Qwen GGUF model file does not exist: " + model_path);
@@ -215,7 +243,7 @@ std::string LlamaGenerator::generate(std::string_view prompt, std::size_t max_re
     }
 
     impl_->evaluate(prompt_tokens);
-    auto* sampler = llama_sampler_init_greedy();
+    auto* sampler = make_sampler(impl_->temperature, impl_->top_p, impl_->seed);
     if (sampler == nullptr) throw std::runtime_error("unable to create llama.cpp sampler");
 
     std::string response;

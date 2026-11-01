@@ -37,6 +37,7 @@ struct Arguments {
     std::string system_prompt{default_system_prompt()};
     bool chat{false};
     std::vector<std::string> inputs;
+    std::string scales;
     std::size_t chunk_bytes{1000};
     std::size_t overlap_bytes{150};
     std::size_t context_tokens{2048};
@@ -45,6 +46,9 @@ struct Arguments {
     std::size_t max_response_tokens{256};
     std::size_t top_k{5};
     std::size_t per_scale{0};
+    double temperature{0.0};
+    double top_p{0.95};
+    std::size_t seed{0xFFFFFFFFu};
     int gpu_layers{0};
     int threads{0};
     cpp_rag::Metric metric{cpp_rag::Metric::cosine};
@@ -55,16 +59,20 @@ struct Arguments {
     std::cerr
         << "Usage:\n"
         << "  cpp-rag index --model MODEL.gguf --output INDEX --input FILE [--input FILE ...]\n"
-        << "                [--chunk-bytes N] [--overlap-bytes N] [--ctx N]\n"
+        << "                [--chunk-bytes N] [--overlap-bytes N]\n"
+        << "                [--scales BYTES:OVERLAP[,BYTES:OVERLAP...]] [--ctx N]\n"
         << "  cpp-rag query --model MODEL.gguf --index INDEX --query TEXT [--top-k N]\n"
         << "                [--metric cosine|dot] [--per-scale N] [--ctx N]\n"
         << "  cpp-rag ask --model EMBED.gguf --generator QWEN.gguf --index INDEX --query TEXT\n"
         << "              [--top-k N] [--metric cosine|dot] [--per-scale N]\n"
         << "              [--system TEXT] [--max-tokens N] [--ctx N] [--embed-ctx N]\n"
-        << "              [--batch N]\n"
+        << "              [--batch N] [--temp T] [--top-p P] [--seed N]\n"
         << "  cpp-rag generate --model QWEN.gguf --prompt TEXT [--chat] [--system TEXT]\n"
         << "                   [--max-tokens N] [--ctx N] [--batch N]\n"
+        << "                   [--temp T] [--top-p P] [--seed N]\n"
         << "Common model options: [--gpu-layers N] [--threads N]\n";
+    std::cerr << "\n--temp 0 (the default) decodes greedily and deterministically; a positive\n"
+                 "--temp samples with top-p, and --seed fixes the sample stream.\n";
 #ifndef CPP_RAG_WITH_LLAMA
     std::cerr << "\nThis binary was built with CPP_RAG_WITH_LLAMA=OFF: every command needs an\n"
                  "embedding model, so none of them can run. Build with llama.cpp for the CLI.\n";
@@ -78,6 +86,17 @@ std::size_t size_value(std::string_view option, const char* value) {
         const auto result = std::stoull(value, &consumed);
         if (consumed != std::string(value).size()) throw std::invalid_argument("trailing");
         return static_cast<std::size_t>(result);
+    } catch (...) {
+        usage("invalid numeric value for " + std::string(option));
+    }
+}
+
+double double_value(std::string_view option, const char* value) {
+    try {
+        std::size_t consumed = 0;
+        const auto result = std::stod(value, &consumed);
+        if (consumed != std::string(value).size()) throw std::invalid_argument("trailing");
+        return result;
     } catch (...) {
         usage("invalid numeric value for " + std::string(option));
     }
@@ -107,6 +126,10 @@ Arguments parse(int argc, char** argv) {
         else if (option == "--system") args.system_prompt = value;
         else if (option == "--chunk-bytes") args.chunk_bytes = size_value(option, value);
         else if (option == "--overlap-bytes") args.overlap_bytes = size_value(option, value);
+        else if (option == "--scales") args.scales = value;
+        else if (option == "--temp") args.temperature = double_value(option, value);
+        else if (option == "--top-p") args.top_p = double_value(option, value);
+        else if (option == "--seed") args.seed = size_value(option, value);
         else if (option == "--ctx") args.context_tokens = size_value(option, value);
         else if (option == "--embed-ctx") args.embed_context_tokens = size_value(option, value);
         else if (option == "--batch") args.batch_tokens = size_value(option, value);
@@ -122,6 +145,8 @@ Arguments parse(int argc, char** argv) {
             else usage("--metric must be cosine or dot");
         } else usage("unknown option: " + std::string(option));
     }
+    if (!(args.temperature >= 0.0)) usage("--temp must be a value >= 0");
+    if (!(args.top_p > 0.0 && args.top_p <= 1.0)) usage("--top-p must be in (0, 1]");
     return args;
 }
 
@@ -133,13 +158,42 @@ cpp_rag::LlamaEmbedder make_embedder(const Arguments& args) {
     return cpp_rag::LlamaEmbedder(args.model, {context, args.gpu_layers, args.threads});
 }
 
+// Parses "BYTES:OVERLAP,BYTES:OVERLAP,..." into chunk scales. An empty spec means
+// the single scale selected by --chunk-bytes/--overlap-bytes.
+std::vector<cpp_rag::ChunkOptions> parse_scales(const std::string& spec) {
+    std::vector<cpp_rag::ChunkOptions> scales;
+    if (spec.empty()) return scales;
+    std::size_t start = 0;
+    while (true) {
+        const auto end = spec.find(',', start);
+        const auto item = spec.substr(start, end == std::string::npos ? std::string::npos
+                                                                     : end - start);
+        const auto colon = item.find(':');
+        if (colon == std::string::npos) {
+            usage("--scales expects BYTES:OVERLAP[,BYTES:OVERLAP...]");
+        }
+        const auto bytes = size_value("--scales", item.substr(0, colon).c_str());
+        const auto overlap = size_value("--scales", item.substr(colon + 1).c_str());
+        if (bytes == 0 || overlap >= bytes) {
+            usage("--scales needs 0 < overlap < bytes in every pair");
+        }
+        scales.push_back({bytes, overlap});
+        if (end == std::string::npos) break;
+        start = end + 1;
+    }
+    return scales;
+}
+
 void run_index(const Arguments& args) {
     if (args.output.empty()) usage("--output is required");
     if (args.inputs.empty()) usage("at least one --input is required");
+    const auto scales = parse_scales(args.scales);
     auto embedder = make_embedder(args);
     std::vector<cpp_rag::IndexItem> items;
     for (const auto& input : args.inputs) {
-        auto chunks = cpp_rag::chunk_file(input, {args.chunk_bytes, args.overlap_bytes});
+        auto chunks = scales.empty()
+            ? cpp_rag::chunk_file(input, {args.chunk_bytes, args.overlap_bytes})
+            : cpp_rag::chunk_file_multi_scale(input, scales);
         std::vector<std::string> texts;
         texts.reserve(chunks.size());
         for (const auto& chunk : chunks) texts.push_back(chunk.text);
@@ -192,7 +246,13 @@ void run_generate(const Arguments& args) {
     const auto stops = chat_stop_sequences();
     cpp_rag::LlamaGenerator generator(
         args.model,
-        {args.context_tokens, args.batch_tokens, args.gpu_layers, args.threads});
+        {args.context_tokens,
+         args.batch_tokens,
+         args.gpu_layers,
+         args.threads,
+         static_cast<float>(args.temperature),
+         static_cast<float>(args.top_p),
+         static_cast<std::uint32_t>(args.seed)});
     std::cout << generator.generate(prompt, args.max_response_tokens, stops) << '\n';
 }
 
@@ -230,7 +290,13 @@ void run_ask(const Arguments& args) {
 
     cpp_rag::LlamaGenerator generator(
         args.generator,
-        {args.context_tokens, args.batch_tokens, args.gpu_layers, args.threads});
+        {args.context_tokens,
+         args.batch_tokens,
+         args.gpu_layers,
+         args.threads,
+         static_cast<float>(args.temperature),
+         static_cast<float>(args.top_p),
+         static_cast<std::uint32_t>(args.seed)});
     const auto stops = chat_stop_sequences();
     if (args.max_response_tokens >= generator.context_size()) {
         throw std::runtime_error("--max-tokens must be smaller than --ctx");

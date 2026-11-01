@@ -26,6 +26,17 @@ That tree builds `cpp_rag_core` and the unit tests, which cover chunking, the in
 
 Editor tooling reads compile flags through `.clangd` from the `build/` tree, so the llama translation units get `llama.h` and `CPP_RAG_WITH_LLAMA` defined. Configuring only `build-core` still parses the core sources, but clangd then borrows a command from another file for the llama sources and treats their llama-only code as inactive.
 
+## Demo
+
+With the llama-enabled build and both models present under `models/` (see below):
+
+```sh
+./demo.sh          # index this README, retrieve, then answer
+./demo.sh query    # retrieval only
+```
+
+The script indexes with two chunk scales, runs a `--per-scale` query and then `ask` with `--temp 0.3 --seed 42`. llama.cpp's model-load and scheduling logs are suppressed at `DEBUG`/`INFO`; set `CPP_RAG_VERBOSE=1` to see them.
+
 ## Models
 
 Model files are not distributed with this repository: `.gitignore` excludes `*.gguf`, so every example below assumes the file already exists under `models/`. Two roles are involved and they are not interchangeable:
@@ -69,7 +80,17 @@ The `docs/*.txt` paths are placeholders; pass your own files (`--input README.md
 
 `--gpu-layers N`, `--threads N`, and `--ctx N` configure model execution. Chunk limits are bytes, while `--ctx` is model tokens; if a chunk tokenizes beyond the context, reduce `--chunk-bytes`. Chunks are cut on UTF-8 code point boundaries and prefer the last whitespace within the second half of the window, so a chunk can be shorter than `--chunk-bytes`; `--overlap-bytes` must be smaller than `--chunk-bytes`. Chunks are embedded in order and never lost: the effective overlap shrinks when a short chunk cannot carry the requested overlap.
 
-Every chunk written by this command has `scale = 0` and `scale_bytes = --chunk-bytes`, i.e. a single chunk scale per index. Multi-scale chunking exists in the library (`chunk_text_multi_scale()` / `chunk_file_multi_scale()` in `include/cpp_rag/chunker.hpp`), and `search()` reports the scale of each result, but the CLI has no flag that produces a multi-scale index yet. `query --per-scale` is therefore only useful for indexes built through the library.
+By default every chunk in the index has `scale = 0` and `scale_bytes = --chunk-bytes`, i.e. one chunk scale per index. Pass `--scales` to index several chunk sizes at once (each embedded once, in order):
+
+```sh
+./build/cpp-rag index \
+  --model models/bge-small-en-v1.5-f16.gguf \
+  --input docs/guide.txt \
+  --output docs.ragidx \
+  --scales 1000:150,300:40
+```
+
+`--scales` and `--chunk-bytes`/`--overlap-bytes` are mutually exclusive in effect: when `--scales` is given it defines the chunking, and the single-scale options are ignored. Each pair must satisfy `0 < overlap < bytes`. Combined with `--per-scale`, this lets one query mix a broad chunk and a narrow one.
 
 ## Query
 
@@ -83,7 +104,7 @@ Every chunk written by this command has `scale = 0` and `scale_bytes = --chunk-b
 
 Results are returned in descending score order; equal scores are ordered by item index, so output is deterministic. Each result reports the chunk scale it came from and its 1-based rank within that scale. Items whose score is not finite are skipped.
 
-`--per-scale N` caps how many results may come from any single chunk scale, which is only meaningful for an index built with more than one chunk scale through the library (see above). Results stay score-ordered and the query may then return fewer than `--top-k` entries:
+`--per-scale N` caps how many results may come from any single chunk scale, which is only meaningful for an index built with `--scales` (see above). Results stay score-ordered and the query may then return fewer than `--top-k` entries:
 
 ```sh
 ./build/cpp-rag query \
@@ -114,7 +135,7 @@ The retrieved context is trimmed to fit `--ctx`: chunks are dropped from the lea
 
 ## Generate with Qwen2.5-3B-Instruct
 
-Use a local Qwen2.5-3B-Instruct GGUF file. The command loads the model and causal context, tokenizes the supplied prompt, evaluates prompt tokens in batches, and greedily generates response tokens:
+Use a local Qwen2.5-3B-Instruct GGUF file. The command loads the model and causal context, tokenizes the supplied prompt, evaluates prompt tokens in batches, and generates response tokens (greedy by default):
 
 ```sh
 ./build/cpp-rag generate \
@@ -124,7 +145,9 @@ Use a local Qwen2.5-3B-Instruct GGUF file. The command loads the model and causa
   --gpu-layers 99
 ```
 
-`--prompt` is passed as already-formatted text unless `--chat` is given, which wraps it in the ChatML template with an optional `--system TEXT` and stops generation at the turn markers instead of running into the next turn. For the RAG layout, construct it with `build_rag_prompt()` from `include/cpp_rag/prompt_builder.hpp`; the returned `std::string` is contiguous and can be passed directly to `LlamaGenerator::generate()`, whose third argument takes stop sequences. Generation uses greedy sampling for deterministic output and fails rather than truncating when prompt plus response capacity exceeds `--ctx`.
+`--prompt` is passed as already-formatted text unless `--chat` is given, which wraps it in the ChatML template with an optional `--system TEXT` and stops generation at the turn markers instead of running into the next turn. For the RAG layout, construct it with `build_rag_prompt()` from `include/cpp_rag/prompt_builder.hpp`; the returned `std::string` is contiguous and can be passed directly to `LlamaGenerator::generate()`, whose third argument takes stop sequences. Generation fails rather than truncating when prompt plus response capacity exceeds `--ctx`.
+
+Decoding is greedy by default, so output is deterministic. `--temp T` switches to sampling (top-k 40, then `--top-p P`, default `0.95`, then temperature); `--seed N` fixes the sample stream and defaults to a random seed. `--temp 0` restores greedy decoding. Both `generate` and `ask` accept these flags.
 
 ## File format
 

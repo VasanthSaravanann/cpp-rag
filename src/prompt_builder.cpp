@@ -32,13 +32,23 @@ void add_size(std::size_t& total, std::size_t amount) {
     total += amount;
 }
 
-// Doubling an angle bracket would let text imitate a fence marker, so a run of
-// identical brackets is broken up with a space: "<<<" becomes "< < <". The text
-// stays readable and the literal marker can never appear inside a chunk.
+// Escapes sequences that are structural to the prompt rather than content:
+//  - runs of identical angle brackets, so text cannot reproduce a fence marker
+//  - chat-template delimiters "<|" and "|>", so text cannot open or close a turn
+//    ("<|im_start|>" would otherwise be tokenised as a real turn boundary and the
+//    model would treat the document as a new system message)
+// A space is inserted between the two characters, which keeps the text readable and
+// leaves ordinary prose untouched.
+[[nodiscard]] bool needs_escape(char current, char next) {
+    if (current == '<' && (next == '<' || next == '|')) return true;
+    if (current == '>' && next == '>') return true;
+    return current == '|' && next == '>';
+}
+
 [[nodiscard]] std::size_t escaped_size(std::string_view text) {
     std::size_t size = text.size();
     for (std::size_t i = 0; i + 1 < text.size(); ++i) {
-        if ((text[i] == '<' || text[i] == '>') && text[i + 1] == text[i]) ++size;
+        if (needs_escape(text[i], text[i + 1])) ++size;
     }
     return size;
 }
@@ -46,9 +56,7 @@ void add_size(std::size_t& total, std::size_t amount) {
 void append_escaped(std::string& out, std::string_view text) {
     for (std::size_t i = 0; i < text.size(); ++i) {
         out.push_back(text[i]);
-        if (i + 1 < text.size() && (text[i] == '<' || text[i] == '>') && text[i + 1] == text[i]) {
-            out.push_back(' ');
-        }
+        if (i + 1 < text.size() && needs_escape(text[i], text[i + 1])) out.push_back(' ');
     }
 }
 

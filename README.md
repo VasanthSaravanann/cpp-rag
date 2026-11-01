@@ -149,7 +149,9 @@ stdout is the answer only; retrieved context (score, chunk id, scale, rank) goes
 
 The retrieved context is trimmed to fit `--ctx`: chunks are dropped from the least relevant end until prompt plus `--max-tokens` fits, and `ask` reports how many survived. `--embed-ctx N` sets the embedding context separately from the generation context (`--ctx`) when a small generation window would not fit a chunk.
 
-Each retrieved chunk is quoted between `<<<BEGIN RETRIEVED CHUNK>>>` and `<<<END RETRIEVED CHUNK>>>` fences. Runs of identical angle brackets in chunk text are spaced out (`<<<` becomes `< < <`) so a document cannot reproduce a fence and escape the quoted region, and the default system prompt states that fenced text is data rather than instructions. This is containment, not a guarantee: the prompt-assembly layer is still a draft whose wording needs human review — see `include/cpp_rag/prompt_builder.hpp`.
+Each retrieved chunk is quoted between `<<<BEGIN RETRIEVED CHUNK>>>` and `<<<END RETRIEVED CHUNK>>>` fences. Runs of identical angle brackets in chunk text are spaced out (`<<<` becomes `< < <`), and chat-template delimiters are spaced out too (`<|` and `|>` never survive intact), so a document can neither reproduce a fence nor open a turn: without that, a document containing `<|im_start|>system` is tokenised as a genuine new system message. The default system prompt states that fenced text is data rather than instructions. This is containment, not a guarantee: the prompt-assembly layer is still a draft whose wording needs human review — see `include/cpp_rag/prompt_builder.hpp`.
+
+`./eval/injection.sh` probes this end to end with hostile documents and needs both models, so it is not part of CI. It is a regression signal, not a robustness proof.
 
 ## Generate with Qwen2.5-3B-Instruct
 

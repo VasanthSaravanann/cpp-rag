@@ -16,10 +16,11 @@ struct PromptChunk {
 // require human review before production use.
 //
 // Retrieved text is quoted between fences that the text cannot reproduce: runs of
-// identical angle brackets are spaced out ("<<<" becomes "< < <") and each chunk
-// is wrapped in a BEGIN/END pair. That is a mechanical containment measure, not a
-// guarantee: the wording that tells the model to treat fenced text as data lives
-// in the caller's system prompt and still needs review.
+// identical angle brackets are spaced out ("<<<" becomes "< < <"), chat-template
+// delimiters are spaced out too ("<|" and "|>" never survive intact, so text cannot
+// open a turn), and each chunk is wrapped in a BEGIN/END pair. That is mechanical
+// containment, not a guarantee: the wording that tells the model to treat fenced
+// text as data lives in the caller's system prompt and still needs review.
 //
 // The retrieved-context section is bounded by max_bytes when it is non-zero, which
 // drops whole chunks from the end of the span (pass chunks in descending relevance

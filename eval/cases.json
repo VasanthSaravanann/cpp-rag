@@ -1,0 +1,164 @@
+{
+  "provenance": "Mechanically drafted from generated fixture documents. NOT a human-labelled gold set: no adjudication, no ambiguity review, no approved thresholds. Use as a regression signal for this harness only.",
+  "documents": [
+    "/Users/sham/Desktop/cpp_rag/eval/documents/storage.md",
+    "/Users/sham/Desktop/cpp_rag/eval/documents/retrieval.md",
+    "/Users/sham/Desktop/cpp_rag/eval/documents/operations.md"
+  ],
+  "cases": [
+    {
+      "id": "storage-01",
+      "document": "storage.md",
+      "question": "what is the source of truth for durability",
+      "expect_substring": "write-ahead log",
+      "no_evidence": false
+    },
+    {
+      "id": "storage-02",
+      "document": "storage.md",
+      "question": "when is an appended record acknowledged",
+      "expect_substring": "log write completes",
+      "no_evidence": false
+    },
+    {
+      "id": "storage-03",
+      "document": "storage.md",
+      "question": "what terminates replay during recovery",
+      "expect_substring": "checksum",
+      "no_evidence": false
+    },
+    {
+      "id": "storage-04",
+      "document": "storage.md",
+      "question": "which structure does a reader consult",
+      "expect_substring": "segment file",
+      "no_evidence": false
+    },
+    {
+      "id": "storage-05",
+      "document": "storage.md",
+      "question": "what happens to a torn final frame",
+      "expect_substring": "discarded",
+      "no_evidence": false
+    },
+    {
+      "id": "storage-06",
+      "document": "storage.md",
+      "question": "what is the record data cap of a single segment",
+      "expect_substring": "64 MiB",
+      "no_evidence": false
+    },
+    {
+      "id": "storage-07",
+      "document": "storage.md",
+      "question": "how large may one record be",
+      "expect_substring": "1 MiB",
+      "no_evidence": false
+    },
+    {
+      "id": "storage-08",
+      "document": "storage.md",
+      "question": "does an update modify a segment in place",
+      "expect_substring": "immutable",
+      "no_evidence": false
+    },
+    {
+      "id": "retrieval-09",
+      "document": "retrieval.md",
+      "question": "how are ties in score ordered",
+      "expect_substring": "ascending item index",
+      "no_evidence": false
+    },
+    {
+      "id": "retrieval-10",
+      "document": "retrieval.md",
+      "question": "what happens to scores that are not finite",
+      "expect_substring": "discarded",
+      "no_evidence": false
+    },
+    {
+      "id": "retrieval-11",
+      "document": "retrieval.md",
+      "question": "can a per-scale quota return fewer results than requested",
+      "expect_substring": "smaller than",
+      "no_evidence": false
+    },
+    {
+      "id": "retrieval-12",
+      "document": "retrieval.md",
+      "question": "is a per-scale quota a re-ranking step",
+      "expect_substring": "not a re-ranking",
+      "no_evidence": false
+    },
+    {
+      "id": "retrieval-13",
+      "document": "retrieval.md",
+      "question": "on what boundaries are chunks cut",
+      "expect_substring": "UTF-8",
+      "no_evidence": false
+    },
+    {
+      "id": "retrieval-14",
+      "document": "retrieval.md",
+      "question": "where does a chunk window prefer to break",
+      "expect_substring": "second half",
+      "no_evidence": false
+    },
+    {
+      "id": "retrieval-15",
+      "document": "retrieval.md",
+      "question": "what should happen when no candidate is retrieved",
+      "expect_substring": "decline",
+      "no_evidence": false
+    },
+    {
+      "id": "retrieval-16",
+      "document": "retrieval.md",
+      "question": "which chunks are dropped when trimming context",
+      "expect_substring": "least relevant",
+      "no_evidence": false
+    },
+    {
+      "id": "operations-17",
+      "document": "operations.md",
+      "question": "what does a backup manifest record",
+      "expect_substring": "sequence",
+      "no_evidence": false
+    },
+    {
+      "id": "operations-18",
+      "document": "operations.md",
+      "question": "what signal is used for capacity planning",
+      "expect_substring": "unflushed",
+      "no_evidence": false
+    },
+    {
+      "id": "operations-19",
+      "document": "operations.md",
+      "question": "what is the remedy when the flusher cannot keep up",
+      "expect_substring": "flush capacity",
+      "no_evidence": false
+    },
+    {
+      "id": "operations-20",
+      "document": "operations.md",
+      "question": "what must happen before a segment format change",
+      "expect_substring": "stopping writers",
+      "no_evidence": false
+    },
+    {
+      "id": "operations-21",
+      "document": "operations.md",
+      "question": "when is a process considered healthy",
+      "expect_substring": "cursor is",
+      "no_evidence": false
+    },
+    {
+      "id": "operations-22",
+      "document": "operations.md",
+      "question": "what is the price of a licence",
+      "expect_substring": "not available",
+      "no_evidence": true
+    }
+  ]
+}

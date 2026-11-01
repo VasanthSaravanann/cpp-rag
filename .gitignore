@@ -2,3 +2,5 @@ build*/
 *.ragidx
 *.gguf
 .DS_Store
+
+eval/.cache/

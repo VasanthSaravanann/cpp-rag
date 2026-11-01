@@ -1,0 +1,64 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  core:
+    # The storage/search core and its tests need no network and no model files.
+    name: core / ${{ matrix.os }} / ${{ matrix.sanitizers && 'sanitizers' || 'strict' }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+        sanitizers: [false, true]
+        exclude:
+          # AppleClang 17 on macOS 26 deadlocks inside dyld during ASan init,
+          # even for an empty main(); this is a toolchain defect, not a project
+          # one. Sanitizer coverage runs on Linux only.
+          - os: macos-15
+            sanitizers: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: >
+          cmake -S . -B build-core
+          -DCPP_RAG_WITH_LLAMA=OFF
+          -DCPP_RAG_BUILD_TESTS=ON
+          -DCPP_RAG_ENABLE_SANITIZERS=${{ matrix.sanitizers }}
+          -DCPP_RAG_WARNINGS_AS_ERRORS=ON
+
+      - name: Build
+        run: cmake --build build-core -j 3
+
+      - name: Test
+        env:
+          ASAN_OPTIONS: detect_leaks=1:strict_string_checks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: ctest --test-dir build-core --output-on-failure
+
+      - name: Inert CLI still explains itself
+        if: ${{ !matrix.sanitizers }}
+        run: |
+          ./build-core/cpp-rag query --index missing --query test >cli.out 2>&1 && {
+            echo "expected a non-zero exit" >&2
+            exit 1
+          }
+          grep -q 'CPP_RAG_WITH_LLAMA=OFF' cli.out
+
+  format:
+    name: format / clang-format
+    if: false # no .clang-format style is defined in this repo yet; enable with one
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          clang-format --dry-run --Werror \
+            include/cpp_rag/*.hpp src/*.cpp src/*.hpp tests/*.cpp eval/*.cpp

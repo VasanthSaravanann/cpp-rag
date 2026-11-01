@@ -24,6 +24,14 @@ ctest --test-dir build-core --output-on-failure
 
 That tree builds `cpp_rag_core` and the unit tests, which cover chunking, the index format and search. The `cpp-rag` binary it also produces is inert by design: every command exits with `this binary was built with CPP_RAG_WITH_LLAMA=OFF`, because indexing, querying and generation all need an embedding model. Build the llama.cpp tree for a usable CLI.
 
+Add `-DCPP_RAG_WARNINGS_AS_ERRORS=ON` for a strict build and
+`-DCPP_RAG_ENABLE_SANITIZERS=ON` for AddressSanitizer plus UndefinedBehaviorSanitizer
+(Clang/GCC). On macOS 26, AppleClang 17 deadlocks inside dyld during ASan initialisation
+even for an empty `main()`, so run the sanitizer build on Linux.
+
+`.github/workflows/ci.yml` runs the strict build and the tests on Ubuntu and macOS,
+and the sanitizer build on Ubuntu only, for the reason above.
+
 Editor tooling reads compile flags through `.clangd` from the `build/` tree, so the llama translation units get `llama.h` and `CPP_RAG_WITH_LLAMA` defined. Configuring only `build-core` still parses the core sources, but clangd then borrows a command from another file for the llama sources and treats their llama-only code as inactive.
 
 ## Demo
@@ -36,6 +44,14 @@ With the llama-enabled build and both models present under `models/` (see below)
 ```
 
 The script indexes with two chunk scales, runs a `--per-scale` query and then `ask` with `--temp 0.3 --seed 42`. llama.cpp's model-load and scheduling logs are suppressed at `DEBUG`/`INFO`; set `CPP_RAG_VERBOSE=1` to see them.
+
+## Measuring a configuration
+
+`./eval/run --scales 1000:150,300:40` indexes a small fixture corpus and reports hit@k
+and MRR per question, plus a summary. `--generate` additionally scores the produced
+answers. The bundled cases are mechanically drafted scaffolding over synthetic
+documents, **not** a human-labelled gold set, so the numbers are a regression signal
+for comparing configurations and nothing more. See `eval/README.md`.
 
 ## Models
 

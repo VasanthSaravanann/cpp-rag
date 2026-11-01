@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Build (if needed) and run the retrieval measurement harness.
+#
+#   ./eval/run --scales 1000:150,300:40
+#   ./eval/run --scales 1000:150 --k 3
+#   ./eval/run --generate --limit 4
+#
+# Needs a llama-enabled cpp-rag binary (CPP_RAG_BIN, default build/cpp-rag).
+# Scores are a regression signal over unverified scaffolding cases, not a
+# quality verdict. See eval/README.md.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+BIN=${CPP_RAG_BIN:-build/cpp-rag}
+BUILD=${EVAL_BUILD:-build-core}
+
+[[ -f eval/cases.json ]] || python3 eval/make_documents.py
+[[ -x $BIN ]] || {
+    echo "no llama-enabled binary at $BIN; build it first:" >&2
+    echo "  cmake -S . -B build && cmake --build build -j" >&2
+    exit 1
+}
+
+if [[ ! -x $BUILD/cpp_rag_eval || eval/eval.cpp -nt $BUILD/cpp_rag_eval ]]; then
+    cmake -S . -B "$BUILD" -DCPP_RAG_WITH_LLAMA=OFF >/dev/null
+    cmake --build "$BUILD" --target cpp_rag_eval -j 3 >/dev/null
+fi
+
+exec "$BUILD/cpp_rag_eval" --bin "$BIN" "$@"

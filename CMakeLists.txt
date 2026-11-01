@@ -8,7 +8,25 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(CPP_RAG_WITH_LLAMA "Build llama.cpp embedding integration" ON)
 option(CPP_RAG_BUILD_TESTS "Build unit tests" ON)
+option(CPP_RAG_ENABLE_SANITIZERS "Build with AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
+option(CPP_RAG_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" OFF)
 set(LLAMA_CPP_DIR "" CACHE PATH "Path to an existing llama.cpp checkout")
+
+if(CPP_RAG_ENABLE_SANITIZERS)
+    if(MSVC)
+        message(FATAL_ERROR "CPP_RAG_ENABLE_SANITIZERS needs Clang or GCC")
+    endif()
+    add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer)
+    add_link_options(-fsanitize=address,undefined)
+endif()
+
+if(CPP_RAG_WARNINGS_AS_ERRORS)
+    if(MSVC)
+        add_compile_options(/WX)
+    else()
+        add_compile_options(-Werror)
+    endif()
+endif()
 
 # PDF text extraction uses PDFKit on Apple platforms and a throwing stub elsewhere.
 add_library(cpp_rag_core STATIC
@@ -90,3 +108,7 @@ if(CPP_RAG_BUILD_TESTS)
     target_link_libraries(cpp_rag_tests PRIVATE cpp_rag_core)
     add_test(NAME cpp_rag_tests COMMAND cpp_rag_tests)
 endif()
+
+# Offline measurement harness. Links no core code: it exercises the CLI binary.
+add_executable(cpp_rag_eval eval/eval.cpp)
+target_compile_features(cpp_rag_eval PRIVATE cxx_std_20)

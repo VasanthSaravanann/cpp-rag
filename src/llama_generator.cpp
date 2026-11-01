@@ -115,14 +115,14 @@ struct LlamaGenerator::Impl {
         seed = options.seed;
 
         if (!std::filesystem::is_regular_file(model_path)) {
-            throw std::runtime_error("Qwen GGUF model file does not exist: " + model_path);
+            throw std::runtime_error("generation GGUF model file does not exist: " + model_path);
         }
 
         auto model_params = llama_model_default_params();
         model_params.n_gpu_layers = options.gpu_layers;
         model = llama_model_load_from_file(model_path.c_str(), model_params);
         if (model == nullptr) {
-            throw std::runtime_error("unable to load Qwen GGUF model: " + model_path);
+            throw std::runtime_error("unable to load generation GGUF model: " + model_path);
         }
 
         auto context_params = llama_context_default_params();
@@ -254,6 +254,9 @@ std::string LlamaGenerator::generate(std::string_view prompt, std::size_t max_re
         for (std::size_t generated = 0; generated < max_response_tokens; ++generated) {
             const auto token = llama_sampler_sample(sampler, impl_->context, -1);
             if (llama_vocab_is_eog(impl_->vocab, token)) break;
+            // Penalties and other stateful samplers only see history that is accepted,
+            // so skipping this makes a repeat penalty act on the prompt alone.
+            llama_sampler_accept(sampler, token);
             response.append(token_piece(impl_->vocab, token));
             // Turn markers such as <|im_end|> are ordinary text for some GGUFs, so
             // generation has to stop on them explicitly instead of running into the

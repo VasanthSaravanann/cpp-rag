@@ -11,6 +11,11 @@ constexpr std::string_view kContextHeader = "\n\n[RETRIEVED CONTEXT]\n";
 constexpr std::string_view kContextHeaderPlain = "[RETRIEVED CONTEXT]\n";
 constexpr std::string_view kChunkPrefix = "[Chunk ID: ";
 constexpr std::string_view kChunkSuffix = "]\n";
+// Retrieved text is untrusted input. It is fenced by markers that cannot be produced
+// by the text itself, so a document cannot close the fence and continue in the
+// surrounding prompt.
+constexpr std::string_view kContextBegin = "<<<BEGIN RETRIEVED CHUNK>>>\n";
+constexpr std::string_view kContextEnd = "\n<<<END RETRIEVED CHUNK>>>";
 constexpr std::string_view kQueryHeader = "[USER QUERY]\n";
 constexpr std::string_view kSectionBreak = "\n\n";
 
@@ -27,12 +32,34 @@ void add_size(std::size_t& total, std::size_t amount) {
     total += amount;
 }
 
+// Doubling an angle bracket would let text imitate a fence marker, so a run of
+// identical brackets is broken up with a space: "<<<" becomes "< < <". The text
+// stays readable and the literal marker can never appear inside a chunk.
+[[nodiscard]] std::size_t escaped_size(std::string_view text) {
+    std::size_t size = text.size();
+    for (std::size_t i = 0; i + 1 < text.size(); ++i) {
+        if ((text[i] == '<' || text[i] == '>') && text[i + 1] == text[i]) ++size;
+    }
+    return size;
+}
+
+void append_escaped(std::string& out, std::string_view text) {
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        out.push_back(text[i]);
+        if (i + 1 < text.size() && (text[i] == '<' || text[i] == '>') && text[i + 1] == text[i]) {
+            out.push_back(' ');
+        }
+    }
+}
+
 std::size_t chunk_size(const PromptChunk& chunk) {
     std::size_t size = 0;
     add_size(size, kChunkPrefix.size());
     add_size(size, chunk.id.size());
     add_size(size, kChunkSuffix.size());
-    add_size(size, chunk.text.size());
+    add_size(size, kContextBegin.size());
+    add_size(size, escaped_size(chunk.text));
+    add_size(size, kContextEnd.size());
     add_size(size, kSectionBreak.size());
     return size;
 }
@@ -83,7 +110,9 @@ std::string build_rag_prompt(std::string_view system_prompt,
         prompt.append(kChunkPrefix);
         prompt.append(chunks[i].id);
         prompt.append(kChunkSuffix);
-        prompt.append(chunks[i].text);
+        prompt.append(kContextBegin);
+        append_escaped(prompt, chunks[i].text);
+        prompt.append(kContextEnd);
         prompt.append(kSectionBreak);
     }
     prompt.append(kQueryHeader);

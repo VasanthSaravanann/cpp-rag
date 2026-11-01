@@ -15,6 +15,12 @@ struct PromptChunk {
 // Draft prompt-assembly boundary. Compliance wording and delimiter behavior
 // require human review before production use.
 //
+// Retrieved text is quoted between fences that the text cannot reproduce: runs of
+// identical angle brackets are spaced out ("<<<" becomes "< < <") and each chunk
+// is wrapped in a BEGIN/END pair. That is a mechanical containment measure, not a
+// guarantee: the wording that tells the model to treat fenced text as data lives
+// in the caller's system prompt and still needs review.
+//
 // The retrieved-context section is bounded by max_bytes when it is non-zero, which
 // drops whole chunks from the end of the span (pass chunks in descending relevance
 // order). The headers and the user query are always emitted. Zero means unbounded.

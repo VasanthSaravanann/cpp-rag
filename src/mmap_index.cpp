@@ -19,21 +19,58 @@ namespace cpp_rag {
 namespace {
 
 constexpr char kMagic[8] = {'C', 'P', 'P', 'R', 'A', 'G', 'I', 'X'};
-constexpr std::uint32_t kVersion = 2;
+constexpr std::uint32_t kVersion = 3;
+// Written in host byte order. A reader on the opposite byte order sees the swapped
+// value and can name the problem instead of reporting a bogus version.
+constexpr std::uint32_t kEndianMarker = 0x01020304U;
+constexpr std::uint32_t kChecksumFnv1a64 = 1U;
+
+constexpr std::uint32_t byte_swap32(std::uint32_t value) {
+    return ((value & 0x000000FFU) << 24) | ((value & 0x0000FF00U) << 8) |
+           ((value & 0x00FF0000U) >> 8) | ((value & 0xFF000000U) >> 24);
+}
 
 struct Header {
     char magic[8];
     std::uint32_t version;
     std::uint32_t header_size;
+    std::uint32_t endian_marker;
+    std::uint32_t record_size;
     std::uint64_t item_count;
     std::uint32_t dimensions;
-    std::uint32_t record_size;
+    std::uint32_t flags;
     std::uint64_t records_offset;
     std::uint64_t vectors_offset;
     std::uint64_t strings_offset;
     std::uint64_t file_size;
+    std::uint32_t checksum_algorithm;
+    std::uint32_t reserved;
+    std::uint64_t payload_checksum;
+    std::uint64_t reserved2;
 };
-static_assert(sizeof(Header) == 64);
+static_assert(sizeof(Header) == 96);
+
+// FNV-1a over the bytes after the header. It is not cryptographic: it detects
+// accidental corruption such as bit rot or a truncated write, not tampering.
+struct Fnv1a64 {
+    std::uint64_t state{14695981039346656037ULL};
+
+    void add(const void* data, std::size_t size) {
+        const auto* bytes = static_cast<const unsigned char*>(data);
+        for (std::size_t i = 0; i < size; ++i) {
+            state ^= bytes[i];
+            state *= 1099511628211ULL;
+        }
+    }
+
+    [[nodiscard]] std::uint64_t value() const noexcept { return state; }
+
+    [[nodiscard]] static std::uint64_t of(const void* data, std::size_t size) {
+        Fnv1a64 hasher;
+        hasher.add(data, size);
+        return hasher.value();
+    }
+};
 
 struct Record {
     std::uint64_t source_offset;
@@ -54,11 +91,12 @@ std::uint64_t align_up(std::uint64_t value, std::uint64_t alignment) {
     return (value + alignment - 1) / alignment * alignment;
 }
 
-void write_padding(std::ofstream& output, std::uint64_t bytes) {
+void write_padding(std::ofstream& output, Fnv1a64& hasher, std::uint64_t bytes) {
     static constexpr char zeros[64]{};
     while (bytes > 0) {
         const auto count = static_cast<std::streamsize>(std::min<std::uint64_t>(bytes, sizeof(zeros)));
         output.write(zeros, count);
+        hasher.add(zeros, static_cast<std::size_t>(count));
         bytes -= static_cast<std::uint64_t>(count);
     }
 }
@@ -96,6 +134,7 @@ void MmapIndex::write(const std::string& path, std::span<const IndexItem> items)
     std::memcpy(file_header.magic, kMagic, sizeof(kMagic));
     file_header.version = kVersion;
     file_header.header_size = sizeof(Header);
+    file_header.endian_marker = kEndianMarker;
     file_header.item_count = items.size();
     file_header.dimensions = static_cast<std::uint32_t>(dimensions);
     file_header.record_size = sizeof(Record);
@@ -129,25 +168,36 @@ void MmapIndex::write(const std::string& path, std::span<const IndexItem> items)
         item_record.norm = static_cast<float>(std::sqrt(squared_norm));
     }
     file_header.file_size = string_cursor;
+    file_header.checksum_algorithm = kChecksumFnv1a64;
 
     const auto temporary = path + ".tmp";
     std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
     if (!output) {
         throw std::runtime_error("unable to create index: " + temporary);
     }
+    // The checksum covers everything after the header, so the header is written
+    // twice: a placeholder now, then again with the digest once the payload is out.
     output.write(reinterpret_cast<const char*>(&file_header), sizeof(file_header));
-    output.write(reinterpret_cast<const char*>(records.data()),
-                 static_cast<std::streamsize>(records.size() * sizeof(Record)));
-    write_padding(output, file_header.vectors_offset -
-                          (file_header.records_offset + records.size() * sizeof(Record)));
+
+    Fnv1a64 hasher;
+    const auto emit = [&](const void* data, std::size_t size) {
+        output.write(static_cast<const char*>(data), static_cast<std::streamsize>(size));
+        hasher.add(data, size);
+    };
+    emit(records.data(), records.size() * sizeof(Record));
+    write_padding(output, hasher,
+                  file_header.vectors_offset -
+                      (file_header.records_offset + records.size() * sizeof(Record)));
     for (const auto& item : items) {
-        output.write(reinterpret_cast<const char*>(item.embedding.data()),
-                     static_cast<std::streamsize>(item.embedding.size() * sizeof(float)));
+        emit(item.embedding.data(), item.embedding.size() * sizeof(float));
     }
     for (const auto& item : items) {
-        output.write(item.chunk.source.data(), static_cast<std::streamsize>(item.chunk.source.size()));
-        output.write(item.chunk.text.data(), static_cast<std::streamsize>(item.chunk.text.size()));
+        emit(item.chunk.source.data(), item.chunk.source.size());
+        emit(item.chunk.text.data(), item.chunk.text.size());
     }
+    file_header.payload_checksum = hasher.value();
+    output.seekp(0);
+    output.write(reinterpret_cast<const char*>(&file_header), sizeof(file_header));
     output.close();
     if (!output) {
         std::filesystem::remove(temporary);
@@ -226,11 +276,27 @@ void MmapIndex::validate() {
     if (std::memcmp(h.magic, kMagic, sizeof(kMagic)) != 0) {
         throw std::runtime_error("invalid index magic");
     }
+    // Version first, so a v1/v2 file reports its real problem: in those layouts the
+    // bytes at the endian-marker offset were the record size. A v3 file from the
+    // opposite byte order reads as an unknown version here, but its marker gives the
+    // specific reason.
     if (h.version != kVersion) {
-        throw std::runtime_error("unsupported index version; rebuild the index for MSI v2");
+        if (h.endian_marker == byte_swap32(kEndianMarker)) {
+            throw std::runtime_error(
+                "index was written on a host with the opposite byte order; rebuild the index");
+        }
+        throw std::runtime_error("unsupported index version; rebuild the index for CPPRAGIX v3");
+    }
+    if (h.endian_marker != kEndianMarker) {
+        if (h.endian_marker == byte_swap32(kEndianMarker)) {
+            throw std::runtime_error(
+                "index was written on a host with the opposite byte order; rebuild the index");
+        }
+        throw std::runtime_error("invalid index endianness marker");
     }
     if (h.header_size != sizeof(Header) || h.record_size != sizeof(Record) ||
-        h.file_size != mapped_size_ || h.dimensions == 0 || h.item_count == 0) {
+        h.file_size != mapped_size_ || h.dimensions == 0 || h.item_count == 0 ||
+        h.checksum_algorithm != kChecksumFnv1a64 || h.flags != 0) {
         throw std::runtime_error("invalid or unsupported index header");
     }
 
@@ -264,6 +330,14 @@ void MmapIndex::validate() {
             r.scale_bytes == 0) {
             throw std::runtime_error("index record is invalid");
         }
+    }
+
+    // Verified last so structural errors keep their specific messages; anything the
+    // section and record checks cannot see (flipped text/vector bytes) lands here.
+    const auto checksum = Fnv1a64::of(data_ + sizeof(Header), mapped_size_ - sizeof(Header));
+    if (checksum != h.payload_checksum) {
+        throw std::runtime_error(
+            "index payload checksum mismatch; the file is corrupt, rebuild the index");
     }
 }
 
